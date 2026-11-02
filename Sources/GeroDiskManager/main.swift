@@ -184,6 +184,7 @@ struct FileRecordInput {
 final class CatalogStore: ObservableObject {
     @Published var disks: [DiskRecord] = []
     @Published var selectedDisk: UUID?
+    @Published var showingHome = true
     @Published var searchText = "" { didSet { scheduleSearch() } }
     @Published var results: [FileRecord] = []
     @Published var visibleChildren: [FileRecord] = []
@@ -251,8 +252,33 @@ final class CatalogStore: ObservableObject {
         }
     }
 
+    func showHome() {
+        showingHome = true
+        selectedDisk = nil
+        currentFolder = nil
+        searchText = ""
+        visibleChildren = []
+    }
+
     func select(_ disk: DiskRecord) {
+        showingHome = false
         selectedDisk = disk.id; currentFolder = disk.rootPath; searchText = ""; loadChildren()
+    }
+
+    func selectFolder(_ disk: DiskRecord, path: String) {
+        showingHome = false
+        selectedDisk = disk.id
+        currentFolder = path
+        searchText = ""
+        loadChildren()
+    }
+
+    func fetchSidebarChildren(diskID: UUID, parent: String, completion: @escaping ([FileRecord]) -> Void) {
+        let db = database
+        Task.detached {
+            let rows = db.children(diskID: diskID, parent: parent)
+            await MainActor.run { completion(rows) }
+        }
     }
 
     func loadChildren() {
@@ -312,23 +338,40 @@ final class CatalogStore: ObservableObject {
 
 struct MainView: View {
     @EnvironmentObject var store: CatalogStore
+
     var body: some View {
         NavigationSplitView {
-            VStack(spacing: 10) {
-                HStack { Text("I TUOI DISCHI").font(.caption.weight(.semibold)).foregroundStyle(.secondary); Spacer(); Button(action: store.addDisk) { Image(systemName: "plus") }.buttonStyle(.borderless) }.padding(.horizontal, 14).padding(.top, 16)
-                List(selection: $store.selectedDisk) {
+            VStack(spacing: 8) {
+                HStack {
+                    Text("CATALOGHI").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button(action: store.addDisk) { Image(systemName: "plus") }.buttonStyle(.borderless).help("Aggiungi disco")
+                }.padding(.horizontal, 14).padding(.top, 16)
+
+                List {
+                    Button(action: store.showHome) {
+                        Label("Home", systemImage: "square.grid.2x2")
+                            .fontWeight(store.showingHome ? .semibold : .regular)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(store.showingHome ? Color.accentColor.opacity(0.12) : Color.clear)
+
                     ForEach(store.disks) { disk in
-                        HStack(spacing: 10) {
-                            Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive").foregroundStyle(disk.isAvailable ? .green : .secondary)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(disk.name).lineLimit(1)
-                                Text("\(disk.itemCount.formatted()) elementi · \(disk.isAvailable ? "Collegato" : "Offline")").font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }.tag(disk.id as UUID?)
+                        DiskSidebarSection(
+                            disk: disk,
+                            selected: store.selectedDisk == disk.id && !store.showingHome,
+                            onSelect: { store.select(disk) }
+                        )
+                        .listRowSeparator(.hidden)
                     }
                 }
-                Button(action: store.addDisk) { Label("Aggiungi disco", systemImage: "plus.circle.fill").frame(maxWidth: .infinity) }.buttonStyle(.borderedProminent).padding(12)
-            }.navigationSplitViewColumnWidth(min: 220, ideal: 250)
+                .listStyle(.sidebar)
+
+                Button(action: store.addDisk) {
+                    Label("Aggiungi disco", systemImage: "plus.circle.fill").frame(maxWidth: .infinity)
+                }.buttonStyle(.borderedProminent).padding(12)
+            }
+            .navigationSplitViewColumnWidth(min: 230, ideal: 260)
         } detail: {
             VStack(spacing: 0) {
                 HStack {
@@ -337,68 +380,200 @@ struct MainView: View {
                         Text("Un'unica ricerca in tutti i tuoi dischi, anche offline.").foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if store.scanning { VStack(alignment: .trailing) { ProgressView(); Text("\(store.progress.formatted()) voci").font(.caption2).foregroundStyle(.secondary) } }
+                    if store.scanning {
+                        VStack(alignment: .trailing) {
+                            ProgressView()
+                            Text("\(store.progress.formatted()) voci").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
                 }.padding(.horizontal, 28).padding(.top, 26).padding(.bottom, 20)
+
                 HStack {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Cerca un file o una cartella…", text: $store.searchText).textFieldStyle(.plain).font(.title3)
-                    if !store.searchText.isEmpty { Button { store.searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain) }
+                    if !store.searchText.isEmpty {
+                        Button { store.searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain)
+                    }
                 }.padding(14).background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 28)
+
                 HStack {
-                    Text(store.searchText.isEmpty ? "CONTENUTO DEL DISCO" : "RISULTATI (MASSIMO 1.000)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(store.searchText.isEmpty ? (store.showingHome ? "I TUOI DISCHI" : "CONTENUTO DEL DISCO") : "RISULTATI (MASSIMO 1.000)")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     Spacer()
-                    if let disk = store.selectedDiskRecord { Button("Aggiorna catalogo") { store.scan(disk) }.disabled(store.scanning || !disk.isAvailable) }
+                    if let disk = store.selectedDiskRecord, !store.showingHome {
+                        Button("Aggiorna catalogo") { store.scan(disk) }.disabled(store.scanning || !disk.isAvailable)
+                    }
                 }.padding(.horizontal, 30).padding(.top, 24).padding(.bottom, 8)
+
                 if !store.searchText.isEmpty {
                     List(store.results) { item in resultRow(item) }
-                } else if let disk = store.selectedDiskRecord {
-                    HStack {
-                        Button(action: store.goUp) { Image(systemName: "arrow.up") }.disabled(store.currentFolder == disk.rootPath)
-                        Text(store.currentFolder == disk.rootPath ? disk.name : URL(fileURLWithPath: store.currentFolder ?? disk.rootPath).lastPathComponent).font(.headline)
-                        Spacer()
-                        Text("\(disk.itemCount.formatted()) elementi indicizzati").font(.caption).foregroundStyle(.secondary)
-                    }.padding(.horizontal, 28).padding(.top, 12)
-                    List(store.visibleChildren) { item in
-                        HStack {
-                            Image(systemName: item.isDirectory ? "folder.fill" : "doc").foregroundStyle(item.isDirectory ? .blue : .secondary)
-                            Text(item.name)
-                            Spacer()
-                            if !item.isDirectory { Text(item.path.components(separatedBy: "/").dropLast().joined(separator: "/")).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
-                        }.contentShape(Rectangle())
-                        .onTapGesture(count: 2) { store.enter(item) }
-                        .contextMenu { Button("Apri / mostra nel Finder") { store.reveal(item) }; if item.isDirectory { Button("Apri cartella") { store.enter(item) } } }
-                    }.listStyle(.inset)
-                } else {
+                } else if store.showingHome || store.selectedDiskRecord == nil {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 14)], spacing: 14) {
                             ForEach(store.disks) { disk in
                                 VStack(alignment: .leading, spacing: 12) {
-                                    HStack { Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive").font(.title2).foregroundStyle(disk.isAvailable ? .green : .secondary); Spacer(); Circle().fill(disk.isAvailable ? .green : .gray).frame(width: 8, height: 8) }
+                                    HStack {
+                                        Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive")
+                                            .font(.title2).foregroundStyle(disk.isAvailable ? .green : .secondary)
+                                        Spacer()
+                                        Circle().fill(disk.isAvailable ? .green : .gray).frame(width: 8, height: 8)
+                                    }
                                     Text(disk.name).font(.headline).lineLimit(1)
                                     Text("\(disk.itemCount.formatted()) elementi").font(.subheadline).foregroundStyle(.secondary)
                                     Text(disk.isAvailable ? "Collegato" : "Offline").font(.caption).foregroundStyle(.secondary)
-                                    HStack { Button("Apri catalogo") { store.select(disk) }; Spacer(); Button { store.scan(disk) } label: { Image(systemName: "arrow.clockwise") }.disabled(!disk.isAvailable || store.scanning) }
-                                }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
+                                    HStack {
+                                        Button("Apri catalogo") { store.select(disk) }
+                                        Spacer()
+                                        Button { store.scan(disk) } label: { Image(systemName: "arrow.clockwise") }
+                                            .disabled(!disk.isAvailable || store.scanning)
+                                    }
+                                }
+                                .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 14))
+                                .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
                                 .contextMenu { Button("Rimuovi catalogo") { store.remove(disk) } }
                             }
                         }.padding(28)
                     }
+                } else if let disk = store.selectedDiskRecord {
+                    HStack {
+                        Button(action: store.goUp) { Image(systemName: "arrow.up") }
+                            .disabled(store.currentFolder == disk.rootPath)
+                        Text(store.currentFolder == disk.rootPath ? disk.name : URL(fileURLWithPath: store.currentFolder ?? disk.rootPath).lastPathComponent)
+                            .font(.headline)
+                        Spacer()
+                        Text("\(disk.itemCount.formatted()) elementi indicizzati").font(.caption).foregroundStyle(.secondary)
+                    }.padding(.horizontal, 28).padding(.top, 12)
+
+                    List(store.visibleChildren) { item in
+                        HStack {
+                            Image(systemName: item.isDirectory ? "folder.fill" : "doc")
+                                .foregroundStyle(item.isDirectory ? .blue : .secondary)
+                            Text(item.name)
+                            Spacer()
+                            if !item.isDirectory {
+                                Text(item.path.components(separatedBy: "/").dropLast().joined(separator: "/"))
+                                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { store.enter(item) }
+                        .contextMenu {
+                            Button("Apri / mostra nel Finder") { store.reveal(item) }
+                            if item.isDirectory { Button("Apri cartella") { store.enter(item) } }
+                        }
+                    }.listStyle(.inset)
                 }
-                HStack { Text(store.status).font(.caption).foregroundStyle(.secondary); Spacer(); Text("\(store.disks.count) dischi").font(.caption).foregroundStyle(.secondary) }.padding(.horizontal, 20).padding(.vertical, 10).background(.bar)
+
+                HStack {
+                    Text(store.status).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(store.disks.count) dischi").font(.caption).foregroundStyle(.secondary)
+                }.padding(.horizontal, 20).padding(.vertical, 10).background(.bar)
             }
         }
     }
 
     @ViewBuilder private func resultRow(_ item: FileRecord) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: item.isDirectory ? "folder.fill" : "doc").foregroundStyle(item.isDirectory ? .blue : .secondary).frame(width: 22)
-            VStack(alignment: .leading, spacing: 3) { Text(item.name).font(.body.weight(.medium)); Text(item.path).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            Image(systemName: item.isDirectory ? "folder.fill" : "doc")
+                .foregroundStyle(item.isDirectory ? .blue : .secondary).frame(width: 22)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.name).font(.body.weight(.medium))
+                Text(item.path).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
                 Text(item.diskName).font(.caption.weight(.semibold))
-                Text(FileManager.default.fileExists(atPath: item.path) ? "Collegato" : "Offline").font(.caption2).foregroundStyle(.secondary)
+                Text(FileManager.default.fileExists(atPath: item.path) ? "Collegato" : "Offline")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
-        }.contentShape(Rectangle()).onTapGesture(count: 2) { store.reveal(item) }
+        }
+        .contentShape(Rectangle()).onTapGesture(count: 2) { store.reveal(item) }
         .contextMenu { Button("Mostra nel Finder") { store.reveal(item) } }
+    }
+}
+
+struct DiskSidebarSection: View {
+    @EnvironmentObject var store: CatalogStore
+    let disk: DiskRecord
+    let selected: Bool
+    let onSelect: () -> Void
+    @State private var expanded = false
+    @State private var children: [FileRecord] = []
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(children) { item in
+                if item.isDirectory {
+                    AnyView(SidebarFolderRow(disk: disk, item: item, depth: 1))
+                } else {
+                    AnyView(Button {
+                        store.selectFolder(disk, path: item.path)
+                    } label: {
+                        Label(item.name, systemImage: "doc").lineLimit(1)
+                    }.buttonStyle(.plain).padding(.leading, 18))
+                }
+            }
+        } label: {
+            Button(action: onSelect) {
+                HStack(spacing: 8) {
+                    Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive")
+                        .foregroundStyle(disk.isAvailable ? .green : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(disk.name).lineLimit(1)
+                        Text("\(disk.itemCount.formatted()) elementi · \(disk.isAvailable ? "Collegato" : "Offline")")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+                .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
+            }.buttonStyle(.plain)
+        }
+        .onChange(of: expanded) { value in
+            if value {
+                store.fetchSidebarChildren(diskID: disk.id, parent: disk.rootPath) { children = $0 }
+            }
+        }
+    }
+}
+
+struct SidebarFolderRow: View {
+    @EnvironmentObject var store: CatalogStore
+    let disk: DiskRecord
+    let item: FileRecord
+    let depth: CGFloat
+    @State private var expanded = false
+    @State private var children: [FileRecord] = []
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(children) { child in
+                if child.isDirectory {
+                    AnyView(SidebarFolderRow(disk: disk, item: child, depth: depth + 1))
+                } else {
+                    AnyView(Button {
+                        store.selectFolder(disk, path: child.path)
+                    } label: {
+                        Label(child.name, systemImage: "doc").lineLimit(1)
+                    }.buttonStyle(.plain).padding(.leading, 18))
+                }
+            }
+        } label: {
+            Button {
+                store.selectFolder(disk, path: item.path)
+            } label: {
+                Label(item.name, systemImage: "folder.fill")
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
+            .buttonStyle(.plain)
+        }
+        .onChange(of: expanded) { value in
+            if value {
+                store.fetchSidebarChildren(diskID: disk.id, parent: item.path) { children = $0 }
+            }
+        }
     }
 }
