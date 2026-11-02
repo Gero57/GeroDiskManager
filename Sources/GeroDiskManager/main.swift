@@ -280,8 +280,12 @@ struct MainView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }.padding(.horizontal, 28).padding(.top, 14)
                     if store.selectedTree.isEmpty {
-                        ContentUnavailableView("Catalogo vuoto", systemImage: "folder",
-                            description: Text("Aggiorna il catalogo per leggere la struttura del disco."))
+                        VStack(spacing: 10) {
+                            Image(systemName: "folder").font(.system(size: 34)).foregroundStyle(.secondary)
+                            Text("Catalogo vuoto").font(.headline)
+                            Text("Aggiorna il catalogo per leggere la struttura del disco.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         List {
                             OutlineGroup(store.selectedTree, children: \.children) { node in
