@@ -243,8 +243,11 @@ final class CatalogStore: ObservableObject {
         for index in disks.indices { disks[index].sortOrder = index; database.upsert(disks[index]) }
     }
 
-    func moveDisks(from source: IndexSet, to destination: Int) {
-        disks.move(fromOffsets: source, toOffset: destination)
+    func moveDisk(_ disk: DiskRecord, by offset: Int) {
+        guard let index = disks.firstIndex(where: { $0.id == disk.id }) else { return }
+        let destination = index + offset
+        guard disks.indices.contains(destination) else { return }
+        disks.swapAt(index, destination)
         for index in disks.indices { disks[index].sortOrder = index; database.upsert(disks[index]) }
     }
 
@@ -447,16 +450,20 @@ struct MainView: View {
                     .buttonStyle(.plain)
                     .listRowBackground(store.showingHome ? Color.accentColor.opacity(0.12) : Color.clear)
 
-                    ForEach(store.disks) { disk in
+                    ForEach(Array(store.disks.enumerated()), id: \.element.id) { index, disk in
                         DiskSidebarSection(
                             disk: disk,
                             selected: store.selectedDisk == disk.id && !store.showingHome,
+                            isReordering: isReordering,
+                            canMoveUp: index > 0,
+                            canMoveDown: index < store.disks.count - 1,
+                            onMoveUp: { store.moveDisk(disk, by: -1) },
+                            onMoveDown: { store.moveDisk(disk, by: 1) },
                             onSelect: { store.select(disk) },
                             onDelete: { diskPendingDeletion = disk }
                         )
                         .listRowSeparator(.hidden)
                     }
-                    .onMove(perform: store.moveDisks)
                 }
                 .listStyle(.sidebar)
 
@@ -640,6 +647,11 @@ struct DiskSidebarSection: View {
     @EnvironmentObject var store: CatalogStore
     let disk: DiskRecord
     let selected: Bool
+    let isReordering: Bool
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
     let onSelect: () -> Void
     let onDelete: () -> Void
     @State private var expanded = false
@@ -659,21 +671,32 @@ struct DiskSidebarSection: View {
                 }
             }
         } label: {
-            Button(action: onSelect) {
-                HStack(spacing: 8) {
-                    Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive")
-                        .foregroundStyle(disk.isAvailable ? .green : .secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(disk.name).lineLimit(1)
-                        Text("\(disk.itemCount.formatted()) elementi · \(disk.isAvailable ? "Collegato" : "Offline")")
-                            .font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                Button(action: onSelect) {
+                    HStack(spacing: 8) {
+                        Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive")
+                            .foregroundStyle(disk.isAvailable ? .green : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(disk.name).lineLimit(1)
+                            Text("\(disk.itemCount.formatted()) elementi · \(disk.isAvailable ? "Collegato" : "Offline")")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
+                    .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
+                }.buttonStyle(.plain)
+                if isReordering {
+                    VStack(spacing: 1) {
+                        Button(action: onMoveUp) { Image(systemName: "chevron.up") }
+                            .buttonStyle(.borderless).disabled(!canMoveUp).help("Sposta in alto")
+                        Button(action: onMoveDown) { Image(systemName: "chevron.down") }
+                            .buttonStyle(.borderless).disabled(!canMoveDown).help("Sposta in basso")
+                    }
+                    .font(.caption2)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 3)
-                .contentShape(Rectangle())
-                .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
-            }.buttonStyle(.plain)
+            }
         }
         .contextMenu { Button("Elimina catalogo", role: .destructive, action: onDelete) }
         .onChange(of: expanded) { value in
