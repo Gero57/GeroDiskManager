@@ -34,47 +34,31 @@ struct CatalogDB {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("GeroDiskManager", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let url = base.appendingPathComponent("catalog.sqlite")
+        // Nuovo archivio normalizzato: il vecchio catalog.sqlite resta intatto come sicurezza.
+        let url = base.appendingPathComponent("catalog-v2.sqlite")
         databasePath = url.path
-        sqlite3_open(url.path, &db)
-        sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;", nil, nil, nil)
+        guard sqlite3_open(url.path, &db) == SQLITE_OK else { return }
+        sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;", nil, nil, nil)
         sqlite3_exec(db, """
         CREATE TABLE IF NOT EXISTS disks(
           id TEXT PRIMARY KEY, name TEXT NOT NULL, rootPath TEXT NOT NULL,
           capacity INTEGER NOT NULL DEFAULT 0, itemCount INTEGER NOT NULL DEFAULT 0,
-          scannedAt REAL
+          scannedAt REAL, mediaType TEXT NOT NULL DEFAULT 'Non specificato',
+          sortOrder INTEGER NOT NULL DEFAULT 0
         );
-        CREATE TABLE IF NOT EXISTS files(
-          id INTEGER PRIMARY KEY AUTOINCREMENT, diskID TEXT NOT NULL,
-          diskName TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL,
-          parentPath TEXT NOT NULL, isDirectory INTEGER NOT NULL
+        CREATE TABLE IF NOT EXISTS items(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          diskID TEXT NOT NULL,
+          parentID INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          path TEXT,
+          isDirectory INTEGER NOT NULL
         );
-        """, nil, nil, nil)
-
-        func hasColumn(_ name: String) -> Bool {
-            var statement: OpaquePointer?
-            defer { sqlite3_finalize(statement) }
-            guard sqlite3_prepare_v2(db, "PRAGMA table_info(disks)", -1, &statement, nil) == SQLITE_OK else { return false }
-            while sqlite3_step(statement) == SQLITE_ROW {
-                if let raw = sqlite3_column_text(statement, 1),
-                   String(cString: raw).caseInsensitiveCompare(name) == .orderedSame {
-                    return true
-                }
-            }
-            return false
-        }
-
-        if !hasColumn("mediaType") {
-            sqlite3_exec(db, "ALTER TABLE disks ADD COLUMN mediaType TEXT NOT NULL DEFAULT 'Non specificato'", nil, nil, nil)
-        }
-        if !hasColumn("sortOrder") {
-            sqlite3_exec(db, "ALTER TABLE disks ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
-        }
-
-        sqlite3_exec(db, """
-        CREATE INDEX IF NOT EXISTS idx_files_disk_parent ON files(diskID,parentPath,isDirectory,name COLLATE NOCASE);
-        CREATE INDEX IF NOT EXISTS idx_files_name ON files(name COLLATE NOCASE);
-        CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+        CREATE INDEX IF NOT EXISTS idx_items_parent
+          ON items(diskID,parentID,isDirectory,name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_items_name ON items(name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_items_directory_path
+          ON items(diskID,path) WHERE isDirectory=1;
         """, nil, nil, nil)
     }
 
@@ -116,60 +100,86 @@ struct CatalogDB {
 
     func removeDisk(_ id: UUID) {
         run {
-            for sql in ["DELETE FROM files WHERE diskID=?", "DELETE FROM disks WHERE id=?"] {
-                var s: OpaquePointer?; sqlite3_prepare_v2(db, sql, -1, &s, nil)
-                bind(id.uuidString, to: 1, in: s); sqlite3_step(s); sqlite3_finalize(s)
-            }
+            var s: OpaquePointer?
+            sqlite3_prepare_v2(db, "DELETE FROM items WHERE diskID=?", -1, &s, nil)
+            bind(id.uuidString, to: 1, in: s); sqlite3_step(s); sqlite3_finalize(s)
+            var d: OpaquePointer?
+            sqlite3_prepare_v2(db, "DELETE FROM disks WHERE id=?", -1, &d, nil)
+            bind(id.uuidString, to: 1, in: d); sqlite3_step(d); sqlite3_finalize(d)
         }
     }
 
-    func replaceFiles(disk: DiskRecord, records: [FileRecordInput]) {
+    func removeDiskFilesOnly(_ id: UUID) {
         run {
-            sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil)
-            var del: OpaquePointer?; sqlite3_prepare_v2(db, "DELETE FROM files WHERE diskID=?", -1, &del, nil)
-            bind(disk.id.uuidString, to: 1, in: del); sqlite3_step(del); sqlite3_finalize(del)
-            var ins: OpaquePointer?
-            sqlite3_prepare_v2(db, "INSERT INTO files(diskID,diskName,name,path,parentPath,isDirectory) VALUES(?,?,?,?,?,?)", -1, &ins, nil)
-            for r in records {
-                sqlite3_reset(ins); sqlite3_clear_bindings(ins)
-                bind(disk.id.uuidString, to: 1, in: ins); bind(disk.name, to: 2, in: ins)
-                bind(r.name, to: 3, in: ins); bind(r.path, to: 4, in: ins); bind(r.parent, to: 5, in: ins)
-                sqlite3_bind_int(ins, 6, r.isDirectory ? 1 : 0)
-                sqlite3_step(ins)
-            }
-            sqlite3_finalize(ins)
-            sqlite3_exec(db, "COMMIT", nil, nil, nil)
+            var s: OpaquePointer?
+            sqlite3_prepare_v2(db, "DELETE FROM items WHERE diskID=?", -1, &s, nil)
+            bind(id.uuidString, to: 1, in: s); sqlite3_step(s); sqlite3_finalize(s)
+        }
+    }
+
+    // Le directory conservano il percorso una sola volta. I file memorizzano
+    // soltanto l'ID della cartella madre e il proprio nome.
+    func insertDirectory(disk: DiskRecord, parentID: Int64, name: String, path: String) -> Int64 {
+        run {
+            var s: OpaquePointer?
+            sqlite3_prepare_v2(db, "INSERT INTO items(diskID,parentID,name,path,isDirectory) VALUES(?,?,?,?,1)", -1, &s, nil)
+            defer { sqlite3_finalize(s) }
+            bind(disk.id.uuidString, to: 1, in: s)
+            sqlite3_bind_int64(s, 2, parentID)
+            bind(name, to: 3, in: s)
+            bind(path, to: 4, in: s)
+            guard sqlite3_step(s) == SQLITE_DONE else { return 0 }
+            return sqlite3_last_insert_rowid(db)
         }
     }
 
     func insertBatch(disk: DiskRecord, records: [FileRecordInput]) {
+        guard !records.isEmpty else { return }
         run {
             sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil)
             var s: OpaquePointer?
-            sqlite3_prepare_v2(db, "INSERT INTO files(diskID,diskName,name,path,parentPath,isDirectory) VALUES(?,?,?,?,?,?)", -1, &s, nil)
+            sqlite3_prepare_v2(db, "INSERT INTO items(diskID,parentID,name,path,isDirectory) VALUES(?,?,?,NULL,0)", -1, &s, nil)
             for r in records {
                 sqlite3_reset(s); sqlite3_clear_bindings(s)
-                bind(disk.id.uuidString, to: 1, in: s); bind(disk.name, to: 2, in: s)
-                bind(r.name, to: 3, in: s); bind(r.path, to: 4, in: s); bind(r.parent, to: 5, in: s)
-                sqlite3_bind_int(s, 6, r.isDirectory ? 1 : 0); sqlite3_step(s)
+                bind(disk.id.uuidString, to: 1, in: s)
+                sqlite3_bind_int64(s, 2, r.parentID)
+                bind(r.name, to: 3, in: s)
+                sqlite3_step(s)
             }
-            sqlite3_finalize(s); sqlite3_exec(db, "COMMIT", nil, nil, nil)
+            sqlite3_finalize(s)
+            sqlite3_exec(db, "COMMIT", nil, nil, nil)
         }
+    }
+
+    private func parentID(diskID: UUID, parentPath: String) -> Int64? {
+        var root: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT rootPath FROM disks WHERE id=?", -1, &root, nil)
+        bind(diskID.uuidString, to: 1, in: root)
+        let isRoot = sqlite3_step(root) == SQLITE_ROW && String(cString: sqlite3_column_text(root, 0)) == parentPath
+        sqlite3_finalize(root)
+        if isRoot { return 0 }
+
+        var s: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT id FROM items WHERE diskID=? AND path=? AND isDirectory=1 LIMIT 1", -1, &s, nil)
+        defer { sqlite3_finalize(s) }
+        bind(diskID.uuidString, to: 1, in: s); bind(parentPath, to: 2, in: s)
+        return sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int64(s, 0) : nil
     }
 
     func children(diskID: UUID, parent: String) -> [FileRecord] {
         run {
+            guard let parentID = parentID(diskID: diskID, parentPath: parent) else { return [] }
+            let pathExpression = "CASE WHEN f.isDirectory=1 THEN f.path WHEN COALESCE(p.path,d.rootPath)='/' THEN '/'||f.name ELSE COALESCE(p.path,d.rootPath)||'/'||f.name END"
+            let sql = "SELECT f.id,f.diskID,d.name,f.name,\(pathExpression),f.isDirectory FROM items f JOIN disks d ON d.id=f.diskID LEFT JOIN items p ON p.id=f.parentID WHERE f.diskID=? AND f.parentID=? ORDER BY f.isDirectory DESC,f.name COLLATE NOCASE LIMIT 5000"
             var out: [FileRecord] = []; var s: OpaquePointer?
-            sqlite3_prepare_v2(db, "SELECT id,diskID,diskName,name,path,isDirectory FROM files WHERE diskID=? AND parentPath=? ORDER BY isDirectory DESC,name COLLATE NOCASE LIMIT 5000", -1, &s, nil)
+            sqlite3_prepare_v2(db, sql, -1, &s, nil)
             defer { sqlite3_finalize(s) }
-            bind(diskID.uuidString, to: 1, in: s); bind(parent, to: 2, in: s)
+            bind(diskID.uuidString, to: 1, in: s); sqlite3_bind_int64(s, 2, parentID)
             while sqlite3_step(s) == SQLITE_ROW { out.append(readRecord(s)) }
             return out
         }
     }
 
-    // La ricerca usa una connessione SQLite dedicata: una scansione LIKE su
-    // milioni di record non deve mai trattenere la coda usata dalla navigazione.
     func search(_ query: String, scope: String, mediaType: String, matchMode: String) -> [FileRecord] {
         guard !Task.isCancelled else { return [] }
         var searchDB: OpaquePointer?
@@ -185,49 +195,34 @@ struct CatalogDB {
         var statement: OpaquePointer?
         let typeFilter: String
         switch scope {
-        case "Cartelle": typeFilter = " AND files.isDirectory=1"
-        case "File": typeFilter = " AND files.isDirectory=0"
+        case "Cartelle": typeFilter = " AND f.isDirectory=1"
+        case "File": typeFilter = " AND f.isDirectory=0"
         default: typeFilter = ""
         }
-        // "Contiene" cerca nel solo nome dell'elemento, non nel percorso:
-        // evita di restituire centinaia di discendenti quando si cerca una cartella
-        // e riduce il lavoro sulle tabelle di cataloghi molto grandi.
         let condition = matchMode == "Nome esatto"
-            ? "files.name = ? COLLATE NOCASE"
-            : "instr(lower(files.name), lower(?)) > 0"
-        let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE " + condition + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
+            ? "f.name = ? COLLATE NOCASE"
+            : "instr(lower(f.name), lower(?)) > 0"
+        let pathExpression = "CASE WHEN f.isDirectory=1 THEN f.path WHEN COALESCE(p.path,d.rootPath)='/' THEN '/'||f.name ELSE COALESCE(p.path,d.rootPath)||'/'||f.name END"
+        let sql = "SELECT f.id,f.diskID,d.name,f.name,\(pathExpression),f.isDirectory FROM items f JOIN disks d ON d.id=f.diskID LEFT JOIN items p ON p.id=f.parentID WHERE " + condition + typeFilter + " AND (?='Tutti' OR d.mediaType=?) ORDER BY f.isDirectory DESC,f.name COLLATE NOCASE LIMIT 1000"
         guard sqlite3_prepare_v2(searchDB, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }
 
         bind(query, to: 1, in: statement)
-        let mediaIndex: Int32 = 2
-        bind(mediaType, to: mediaIndex, in: statement)
-        bind(mediaType, to: mediaIndex + 1, in: statement)
+        bind(mediaType, to: 2, in: statement)
+        bind(mediaType, to: 3, in: statement)
 
         while !Task.isCancelled {
             let result = sqlite3_step(statement)
-            if result == SQLITE_ROW {
-                out.append(readRecord(statement))
-            } else {
-                break
-            }
+            if result == SQLITE_ROW { out.append(readRecord(statement)) }
+            else { break }
         }
         return Task.isCancelled ? [] : out
-    }
-
-    func removeDiskFilesOnly(_ id: UUID) {
-        run {
-            var s: OpaquePointer?
-            sqlite3_prepare_v2(db, "DELETE FROM files WHERE diskID=?", -1, &s, nil)
-            bind(id.uuidString, to: 1, in: s)
-            sqlite3_step(s)
-            sqlite3_finalize(s)
-        }
     }
 
     private func bind(_ value: String, to index: Int32, in stmt: OpaquePointer?) {
         sqlite3_bind_text(stmt, index, value, -1, transient)
     }
+
     private func readRecord(_ s: OpaquePointer?) -> FileRecord {
         FileRecord(id: sqlite3_column_int64(s, 0),
             diskID: UUID(uuidString: String(cString: sqlite3_column_text(s, 1))) ?? UUID(),
@@ -239,10 +234,8 @@ struct CatalogDB {
 }
 
 struct FileRecordInput {
+    let parentID: Int64
     let name: String
-    let path: String
-    let parent: String
-    let isDirectory: Bool
 }
 
 @MainActor
@@ -308,17 +301,46 @@ final class CatalogStore: ObservableObject {
                 await MainActor.run { self.scanning = false; self.status = "Impossibile leggere il disco" }
                 return
             }
-            var batch: [FileRecordInput] = []; var total = 0
+            var batch: [FileRecordInput] = []
+            var directoryIDs: [String: Int64] = [disk.rootPath: 0]
+            var total = 0
             db.removeDiskFilesOnly(disk.id)
+
+            func flushFiles() {
+                guard !batch.isEmpty else { return }
+                db.insertBatch(disk: disk, records: batch)
+                total += batch.count
+                batch.removeAll(keepingCapacity: true)
+            }
+
             while let url = enumerator.nextObject() as? URL {
                 let values = try? url.resourceValues(forKeys: Set(keys))
                 if values?.isHidden == true { continue }
-                batch.append(FileRecordInput(name: url.lastPathComponent, path: url.path,
-                    parent: url.deletingLastPathComponent().path, isDirectory: values?.isDirectory ?? false))
-                if batch.count >= 750 {
-                    db.insertBatch(disk: disk, records: batch); total += batch.count; batch.removeAll(keepingCapacity: true)
+                let parentPath = url.deletingLastPathComponent().path
+                guard let parentID = directoryIDs[parentPath] else { continue }
+                let isDirectory = values?.isDirectory ?? false
+
+                if isDirectory {
+                    // Inseriamo subito le directory per conoscere l'ID da assegnare ai figli.
+                    flushFiles()
+                    let id = db.insertDirectory(disk: disk, parentID: parentID,
+                                                name: url.lastPathComponent, path: url.path)
+                    if id > 0 {
+                        directoryIDs[url.path] = id
+                        total += 1
+                    }
+                } else {
+                    batch.append(FileRecordInput(parentID: parentID, name: url.lastPathComponent))
+                    if batch.count >= 750 { flushFiles() }
+                }
+
+                if total > 0 && total % 3000 == 0 {
                     let count = total
                     await MainActor.run { self.progress = count; self.status = "Catalogati \(count.formatted()) elementi…" }
+                }
+            }
+            flushFiles()
+            await MainActor.run { self.progress = count; self.status = "Catalogati \(count.formatted()) elementi…" }
                 }
             }
             if !batch.isEmpty { db.insertBatch(disk: disk, records: batch); total += batch.count }
