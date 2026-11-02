@@ -27,6 +27,7 @@ struct FileRecord: Identifiable, Hashable {
 
 struct CatalogDB {
     private var db: OpaquePointer?
+    private let databasePath: String
     private let queue = DispatchQueue(label: "it.gero.diskmanager.database", qos: .userInitiated)
 
     init() {
@@ -34,6 +35,7 @@ struct CatalogDB {
             .appendingPathComponent("GeroDiskManager", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let url = base.appendingPathComponent("catalog.sqlite")
+        databasePath = url.path
         sqlite3_open(url.path, &db)
         sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;", nil, nil, nil)
         sqlite3_exec(db, """
@@ -166,31 +168,53 @@ struct CatalogDB {
         }
     }
 
+    // La ricerca usa una connessione SQLite dedicata: una scansione LIKE su
+    // milioni di record non deve mai trattenere la coda usata dalla navigazione.
     func search(_ query: String, scope: String, mediaType: String, matchMode: String) -> [FileRecord] {
-        run {
-            // Le ricerche obsolete vengono scartate appena arrivano in coda,
-            // così non bloccano la navigazione tra dischi e cartelle.
-            guard !Task.isCancelled else { return [] }
-            var out: [FileRecord] = []; var s: OpaquePointer?
-            let typeFilter: String
-            switch scope {
-            case "Cartelle": typeFilter = " AND isDirectory=1"
-            case "File": typeFilter = " AND isDirectory=0"
-            default: typeFilter = ""
-            }
-            let condition = matchMode == "Nome esatto" ? "files.name = ? COLLATE NOCASE" : "(files.name LIKE ? ESCAPE '\\' OR files.path LIKE ? ESCAPE '\\')"
-            let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE " + condition + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
-            sqlite3_prepare_v2(db, sql, -1, &s, nil)
-            defer { sqlite3_finalize(s) }
-            let escaped = query.replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_")
-            let q = matchMode == "Nome esatto" ? query : "%" + escaped + "%"
-            bind(q, to: 1, in: s)
-            if matchMode != "Nome esatto" { bind(q, to: 2, in: s) }
-            let mediaIndex: Int32 = matchMode == "Nome esatto" ? 2 : 3
-            bind(mediaType, to: mediaIndex, in: s); bind(mediaType, to: mediaIndex + 1, in: s)
-            while sqlite3_step(s) == SQLITE_ROW { out.append(readRecord(s)) }
-            return out
+        guard !Task.isCancelled else { return [] }
+        var searchDB: OpaquePointer?
+        guard sqlite3_open_v2(databasePath, &searchDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              let searchDB else {
+            if let searchDB { sqlite3_close(searchDB) }
+            return []
         }
+        defer { sqlite3_close(searchDB) }
+        sqlite3_busy_timeout(searchDB, 5000)
+
+        var out: [FileRecord] = []
+        var statement: OpaquePointer?
+        let typeFilter: String
+        switch scope {
+        case "Cartelle": typeFilter = " AND files.isDirectory=1"
+        case "File": typeFilter = " AND files.isDirectory=0"
+        default: typeFilter = ""
+        }
+        let condition = matchMode == "Nome esatto"
+            ? "files.name = ? COLLATE NOCASE"
+            : "(files.name LIKE ? ESCAPE '\\\\' OR files.path LIKE ? ESCAPE '\\\\')"
+        let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE " + condition + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
+        guard sqlite3_prepare_v2(searchDB, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        let escaped = query.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        let value = matchMode == "Nome esatto" ? query : "%" + escaped + "%"
+        bind(value, to: 1, in: statement)
+        if matchMode != "Nome esatto" { bind(value, to: 2, in: statement) }
+        let mediaIndex: Int32 = matchMode == "Nome esatto" ? 2 : 3
+        bind(mediaType, to: mediaIndex, in: statement)
+        bind(mediaType, to: mediaIndex + 1, in: statement)
+
+        while !Task.isCancelled {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_ROW {
+                out.append(readRecord(statement))
+            } else {
+                break
+            }
+        }
+        return Task.isCancelled ? [] : out
     }
 
     func removeDiskFilesOnly(_ id: UUID) {
