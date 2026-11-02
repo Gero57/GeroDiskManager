@@ -189,16 +189,18 @@ struct CatalogDB {
         case "File": typeFilter = " AND files.isDirectory=0"
         default: typeFilter = ""
         }
+        // "Contiene" cerca nel solo nome dell'elemento, non nel percorso:
+        // evita di restituire centinaia di discendenti quando si cerca una cartella
+        // e riduce il lavoro sulle tabelle di cataloghi molto grandi.
         let condition = matchMode == "Nome esatto"
             ? "files.name = ? COLLATE NOCASE"
-            : "(instr(lower(files.name), lower(?)) > 0 OR instr(lower(files.path), lower(?)) > 0)"
+            : "instr(lower(files.name), lower(?)) > 0"
         let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE " + condition + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
         guard sqlite3_prepare_v2(searchDB, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }
 
         bind(query, to: 1, in: statement)
-        if matchMode != "Nome esatto" { bind(query, to: 2, in: statement) }
-        let mediaIndex: Int32 = matchMode == "Nome esatto" ? 2 : 3
+        let mediaIndex: Int32 = 2
         bind(mediaType, to: mediaIndex, in: statement)
         bind(mediaType, to: mediaIndex + 1, in: statement)
 
