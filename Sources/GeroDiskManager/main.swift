@@ -138,10 +138,17 @@ struct CatalogDB {
         }
     }
 
-    func search(_ query: String) -> [FileRecord] {
+    func search(_ query: String, scope: String) -> [FileRecord] {
         run {
             var out: [FileRecord] = []; var s: OpaquePointer?
-            sqlite3_prepare_v2(db, "SELECT id,diskID,diskName,name,path,isDirectory FROM files WHERE name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' ORDER BY name COLLATE NOCASE LIMIT 1000", -1, &s, nil)
+            let typeFilter: String
+            switch scope {
+            case "Cartelle": typeFilter = " AND isDirectory=1"
+            case "File": typeFilter = " AND isDirectory=0"
+            default: typeFilter = ""
+            }
+            let sql = "SELECT id,diskID,diskName,name,path,isDirectory FROM files WHERE (name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')" + typeFilter + " ORDER BY isDirectory DESC,name COLLATE NOCASE LIMIT 1000"
+            sqlite3_prepare_v2(db, sql, -1, &s, nil)
             defer { sqlite3_finalize(s) }
             let q = "%" + query.replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
             bind(q, to: 1, in: s); bind(q, to: 2, in: s)
@@ -186,6 +193,7 @@ final class CatalogStore: ObservableObject {
     @Published var selectedDisk: UUID?
     @Published var showingHome = true
     @Published var searchText = "" { didSet { scheduleSearch() } }
+    @Published var searchScope = "Cartelle" { didSet { scheduleSearch() } }
     @Published var results: [FileRecord] = []
     @Published var visibleChildren: [FileRecord] = []
     @Published var currentFolder: String?
@@ -305,7 +313,8 @@ final class CatalogStore: ObservableObject {
         searchTask = Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
             if Task.isCancelled { return }
-            let rows = await Task.detached { db.search(q) }.value
+            let scope = searchScope
+            let rows = await Task.detached { db.search(q, scope: scope) }.value
             if !Task.isCancelled { results = rows }
         }
     }
@@ -423,7 +432,20 @@ struct MainView: View {
                     if !store.searchText.isEmpty {
                         Button { store.searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain)
                     }
-                }.padding(14).background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 28)
+                }
+                .padding(14).background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 28)
+
+                if !store.searchText.isEmpty {
+                    HStack(spacing: 12) {
+                        Text("Mostra:").font(.caption).foregroundStyle(.secondary)
+                        Picker("Tipo di risultato", selection: $store.searchScope) {
+                            Text("Cartelle").tag("Cartelle")
+                            Text("File").tag("File")
+                            Text("Tutto").tag("Tutto")
+                        }.pickerStyle(.segmented).frame(maxWidth: 300)
+                        Spacer()
+                    }.padding(.horizontal, 30).padding(.top, 10)
+                }
 
                 HStack {
                     Text(store.searchText.isEmpty ? (store.showingHome ? "I TUOI DISCHI" : "CONTENUTO DEL DISCO") : "RISULTATI (MASSIMO 1.000)")
