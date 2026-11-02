@@ -11,6 +11,7 @@ struct DiskRecord: Identifiable, Codable, Hashable {
     var capacity: Int64
     var itemCount: Int
     var scannedAt: Date?
+    var mediaType: String = "Non specificato"
     var isAvailable: Bool { FileManager.default.fileExists(atPath: rootPath) }
 }
 
@@ -38,8 +39,10 @@ struct CatalogDB {
         CREATE TABLE IF NOT EXISTS disks(
           id TEXT PRIMARY KEY, name TEXT NOT NULL, rootPath TEXT NOT NULL,
           capacity INTEGER NOT NULL DEFAULT 0, itemCount INTEGER NOT NULL DEFAULT 0,
-          scannedAt REAL
+          scannedAt REAL,
+          mediaType TEXT NOT NULL DEFAULT 'Non specificato'
         );
+        ALTER TABLE disks ADD COLUMN mediaType TEXT NOT NULL DEFAULT 'Non specificato';
         CREATE TABLE IF NOT EXISTS files(
           id INTEGER PRIMARY KEY AUTOINCREMENT, diskID TEXT NOT NULL,
           diskName TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL,
@@ -57,7 +60,7 @@ struct CatalogDB {
         run {
             var out: [DiskRecord] = []
             var stmt: OpaquePointer?
-            sqlite3_prepare_v2(db, "SELECT id,name,rootPath,capacity,itemCount,scannedAt FROM disks ORDER BY name COLLATE NOCASE", -1, &stmt, nil)
+            sqlite3_prepare_v2(db, "SELECT id,name,rootPath,capacity,itemCount,scannedAt,mediaType FROM disks ORDER BY name COLLATE NOCASE", -1, &stmt, nil)
             defer { sqlite3_finalize(stmt) }
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let id = String(cString: sqlite3_column_text(stmt, 0))
@@ -66,7 +69,8 @@ struct CatalogDB {
                     rootPath: String(cString: sqlite3_column_text(stmt, 2)),
                     capacity: sqlite3_column_int64(stmt, 3),
                     itemCount: Int(sqlite3_column_int64(stmt, 4)),
-                    scannedAt: sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5))))
+                    scannedAt: sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5)),
+                    mediaType: String(cString: sqlite3_column_text(stmt, 6))))
             }
             return out
         }
@@ -75,11 +79,12 @@ struct CatalogDB {
     func upsert(_ disk: DiskRecord) {
         run {
             var s: OpaquePointer?
-            sqlite3_prepare_v2(db, "INSERT INTO disks(id,name,rootPath,capacity,itemCount,scannedAt) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,rootPath=excluded.rootPath,capacity=excluded.capacity,itemCount=excluded.itemCount,scannedAt=excluded.scannedAt", -1, &s, nil)
+            sqlite3_prepare_v2(db, "INSERT INTO disks(id,name,rootPath,capacity,itemCount,scannedAt,mediaType) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,rootPath=excluded.rootPath,capacity=excluded.capacity,itemCount=excluded.itemCount,scannedAt=excluded.scannedAt,mediaType=excluded.mediaType", -1, &s, nil)
             defer { sqlite3_finalize(s) }
             bind(disk.id.uuidString, to: 1, in: s); bind(disk.name, to: 2, in: s); bind(disk.rootPath, to: 3, in: s)
             sqlite3_bind_int64(s, 4, disk.capacity); sqlite3_bind_int64(s, 5, Int64(disk.itemCount))
             if let date = disk.scannedAt { sqlite3_bind_double(s, 6, date.timeIntervalSince1970) } else { sqlite3_bind_null(s, 6) }
+            bind(disk.mediaType, to: 7, in: s)
             sqlite3_step(s)
         }
     }
@@ -138,7 +143,7 @@ struct CatalogDB {
         }
     }
 
-    func search(_ query: String, scope: String) -> [FileRecord] {
+    func search(_ query: String, scope: String, mediaType: String) -> [FileRecord] {
         run {
             var out: [FileRecord] = []; var s: OpaquePointer?
             let typeFilter: String
@@ -147,11 +152,12 @@ struct CatalogDB {
             case "File": typeFilter = " AND isDirectory=0"
             default: typeFilter = ""
             }
-            let sql = "SELECT id,diskID,diskName,name,path,isDirectory FROM files WHERE (name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')" + typeFilter + " ORDER BY isDirectory DESC,name COLLATE NOCASE LIMIT 1000"
+            let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE (files.name LIKE ? ESCAPE '\\' OR files.path LIKE ? ESCAPE '\\')" + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
             sqlite3_prepare_v2(db, sql, -1, &s, nil)
             defer { sqlite3_finalize(s) }
             let q = "%" + query.replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
             bind(q, to: 1, in: s); bind(q, to: 2, in: s)
+            bind(mediaType, to: 3, in: s); bind(mediaType, to: 4, in: s)
             while sqlite3_step(s) == SQLITE_ROW { out.append(readRecord(s)) }
             return out
         }
@@ -194,6 +200,7 @@ final class CatalogStore: ObservableObject {
     @Published var showingHome = true
     @Published var searchText = "" { didSet { scheduleSearch() } }
     @Published var searchScope = "Cartelle" { didSet { scheduleSearch() } }
+    @Published var searchMediaType = "Tutti" { didSet { scheduleSearch() } }
     @Published var results: [FileRecord] = []
     @Published var visibleChildren: [FileRecord] = []
     @Published var currentFolder: String?
@@ -314,9 +321,17 @@ final class CatalogStore: ObservableObject {
             try? await Task.sleep(nanoseconds: 250_000_000)
             if Task.isCancelled { return }
             let scope = searchScope
-            let rows = await Task.detached { db.search(q, scope: scope) }.value
+            let mediaType = searchMediaType
+            let rows = await Task.detached { db.search(q, scope: scope, mediaType: mediaType) }.value
             if !Task.isCancelled { results = rows }
         }
+    }
+
+    func setMediaType(_ type: String, for disk: DiskRecord) {
+        guard let index = disks.firstIndex(where: { $0.id == disk.id }) else { return }
+        disks[index].mediaType = type
+        database.upsert(disks[index])
+        scheduleSearch()
     }
 
     func remove(_ disk: DiskRecord) {
@@ -443,6 +458,10 @@ struct MainView: View {
                             Text("File").tag("File")
                             Text("Tutto").tag("Tutto")
                         }.pickerStyle(.segmented).frame(maxWidth: 300)
+                        Picker("Supporto", selection: $store.searchMediaType) {
+                            Text("Tutti i supporti").tag("Tutti")
+                            ForEach(["HDD", "SSD", "USB", "Scheda SD", "Altro", "Non specificato"], id: \.self) { Text($0).tag($0) }
+                        }.frame(width: 170)
                         Spacer()
                     }.padding(.horizontal, 30).padding(.top, 10)
                 }
@@ -472,6 +491,12 @@ struct MainView: View {
                                     Text(disk.name).font(.headline).lineLimit(1)
                                     Text("\(disk.itemCount.formatted()) elementi").font(.subheadline).foregroundStyle(.secondary)
                                     Text(disk.isAvailable ? "Collegato" : "Offline").font(.caption).foregroundStyle(.secondary)
+                                    Picker("Supporto", selection: Binding(
+                                        get: { store.disks.first(where: { $0.id == disk.id })?.mediaType ?? "Non specificato" },
+                                        set: { store.setMediaType($0, for: disk) }
+                                    )) {
+                                        ForEach(["Non specificato", "HDD", "SSD", "USB", "Scheda SD", "Altro"], id: \.self) { Text($0).tag($0) }
+                                    }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
                                     HStack {
                                         Button("Apri catalogo") { store.select(disk) }
                                         Spacer()
