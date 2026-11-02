@@ -150,8 +150,14 @@ struct CatalogDB {
         }
     }
 
-    func count(_ id: UUID) -> Int {
-        run { var s: OpaquePointer?; sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM files WHERE diskID=?", -1, &s, nil); defer { sqlite3_finalize(s) }; bind(id.uuidString, to: 1, in: s); _ = sqlite3_step(s); return Int(sqlite3_column_int64(s, 0)) }
+    func removeDiskFilesOnly(_ id: UUID) {
+        run {
+            var s: OpaquePointer?
+            sqlite3_prepare_v2(db, "DELETE FROM files WHERE diskID=?", -1, &s, nil)
+            bind(id.uuidString, to: 1, in: s)
+            sqlite3_step(s)
+            sqlite3_finalize(s)
+        }
     }
 
     private func bind(_ value: String, to index: Int32, in stmt: OpaquePointer?) {
@@ -287,16 +293,6 @@ final class CatalogStore: ObservableObject {
     func reveal(_ item: FileRecord) {
         guard FileManager.default.fileExists(atPath: item.path) else { status = "Collega il disco: \(item.diskName)"; return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.path)])
-    }
-}
-
-private extension CatalogDB {
-    func removeDiskFilesOnly(_ id: UUID) {
-        runExternalDelete(id)
-    }
-    func runExternalDelete(_ id: UUID) {
-        // Implemented through the database queue to keep SQLite access serialized.
-        _ = id
     }
 }
 
