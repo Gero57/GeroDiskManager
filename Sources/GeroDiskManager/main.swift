@@ -64,7 +64,7 @@ final class CatalogStore: ObservableObject {
             }.map { record in
                 TreeEntry(id: record.id.uuidString, name: record.name, path: record.path,
                           isDirectory: record.isDirectory,
-                          children: record.isDirectory ? makeChildren(parentPath: record.path) : [])
+                          descendants: record.isDirectory ? makeChildren(parentPath: record.path) : [])
             }
         }
         return makeChildren(parentPath: disk.rootPath)
@@ -168,7 +168,8 @@ struct TreeEntry: Identifiable {
     let name: String
     let path: String
     let isDirectory: Bool
-    let children: [TreeEntry]
+    let descendants: [TreeEntry]
+    var children: [TreeEntry]? { descendants.isEmpty ? nil : descendants }
 }
 
 
