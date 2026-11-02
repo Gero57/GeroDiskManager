@@ -191,7 +191,7 @@ struct CatalogDB {
         }
         let condition = matchMode == "Nome esatto"
             ? "files.name = ? COLLATE NOCASE"
-            : "(files.name LIKE ? ESCAPE '\\\\' OR files.path LIKE ? ESCAPE '\\\\')"
+            : "(files.name LIKE ? ESCAPE '\\' OR files.path LIKE ? ESCAPE '\\')"
         let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE " + condition + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
         guard sqlite3_prepare_v2(searchDB, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }
