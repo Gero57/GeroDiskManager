@@ -1,0 +1,59 @@
+name: Build Gero Disk Manager
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build universal app executable (Apple Silicon)
+        run: |
+          swift build -c release --triple arm64-apple-macosx13.0
+      - name: Assemble macOS application
+        run: |
+          APP="Gero Disk Manager.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          BIN="$(swift build -c release --triple arm64-apple-macosx13.0 --show-bin-path)/GeroDiskManager"
+          test -f "$BIN"
+          cp "$BIN" "$APP/Contents/MacOS/GeroDiskManager"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Gero Disk Manager</string>
+            <key>CFBundleDisplayName</key><string>Gero Disk Manager</string>
+            <key>CFBundleIdentifier</key><string>it.gero.diskmanager</string>
+            <key>CFBundleExecutable</key><string>GeroDiskManager</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSMinimumSystemVersion</key><string>13.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSPrincipalClass</key><string>NSApplication</string>
+          </dict>
+          </plist>
+          PLIST
+          chmod +x "$APP/Contents/MacOS/GeroDiskManager"
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "Gero-Disk-Manager-macOS-arm64.zip"
+      - name: Verify app bundle
+        run: |
+          test -d "Gero Disk Manager.app"
+          test -x "Gero Disk Manager.app/Contents/MacOS/GeroDiskManager"
+          plutil -lint "Gero Disk Manager.app/Contents/Info.plist"
+          codesign --verify --deep --strict "Gero Disk Manager.app"
+      - name: Upload installable app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gero-Disk-Manager-macOS-arm64
+          path: Gero-Disk-Manager-macOS-arm64.zip
+          if-no-files-found: error
+          retention-days: 30
