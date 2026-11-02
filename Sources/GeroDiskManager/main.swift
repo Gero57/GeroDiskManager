@@ -438,7 +438,6 @@ struct MainView: View {
                     .onMove(perform: store.moveDisks)
                 }
                 .listStyle(.sidebar)
-                .environment(\.editMode, .constant(isReordering ? .active : .inactive))
 
                 Button(action: store.addDisk) {
                     Label("Aggiungi disco", systemImage: "plus.circle.fill").frame(maxWidth: .infinity)
