@@ -239,7 +239,8 @@ final class CatalogStore: ObservableObject {
     @Published var progress = 0
     @Published var status = "Aggiungi un disco per iniziare"
     private let database = CatalogDB()
-    private var searchTask: Task<Void, Never>?\n    private var searchWorker: Task<[FileRecord], Never>?
+    private var searchTask: Task<Void, Never>?
+    private var searchWorker: Task<[FileRecord], Never>?
 
     init() {
         disks = database.disks()
