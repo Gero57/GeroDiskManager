@@ -338,7 +338,33 @@ final class CatalogStore: ObservableObject {
 
 struct MainView: View {
     @EnvironmentObject var store: CatalogStore
-
+    @AppStorage("appearanceTheme") private var appearanceTheme = "Scuro"
+    @AppStorage("backgroundTone") private var backgroundTone = "Blu"
+    @AppStorage("textScale") private var textScale = 1.0
+    @State private var showingSettings = false
+    private var colorScheme: ColorScheme? { appearanceTheme == "Chiaro" ? .light : .dark }
+    private var dynamicType: DynamicTypeSize {
+        switch textScale {
+        case ..<0.85: return .small
+        case ..<1.0: return .medium
+        case ..<1.15: return .large
+        case ..<1.3: return .xLarge
+        case ..<1.5: return .xxLarge
+        default: return .xxxLarge
+        }
+    }
+    private var accent: Color { appearanceTheme == "Classico" ? Color(red: 0.66, green: 0.46, blue: 0.22) : Color.accentColor }
+    private var canvas: Color {
+        if appearanceTheme == "Classico" { return Color(red: 0.20, green: 0.17, blue: 0.13) }
+        if appearanceTheme == "Chiaro" { return Color(nsColor: .windowBackgroundColor) }
+        switch backgroundTone {
+        case "Viola": return Color(red: 0.12, green: 0.09, blue: 0.20)
+        case "Verde": return Color(red: 0.07, green: 0.16, blue: 0.15)
+        case "Grafite": return Color(red: 0.10, green: 0.11, blue: 0.13)
+        case "Ardesia": return Color(red: 0.12, green: 0.15, blue: 0.20)
+        default: return Color(red: 0.06, green: 0.11, blue: 0.19)
+        }
+    }
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 8) {
@@ -379,6 +405,9 @@ struct MainView: View {
                         Text("Gero Disk Manager").font(.largeTitle.bold())
                         Text("Un'unica ricerca in tutti i tuoi dischi, anche offline.").foregroundStyle(.secondary)
                     }
+                    Button { showingSettings = true } label: {
+                        Image(systemName: "gearshape").font(.title2)
+                    }.buttonStyle(.borderless).help("Impostazioni")
                     Spacer()
                     if store.scanning {
                         VStack(alignment: .trailing) {
@@ -471,6 +500,14 @@ struct MainView: View {
                 }.padding(.horizontal, 20).padding(.vertical, 10).background(.bar)
             }
         }
+        .sheet(isPresented: $showingSettings) {
+            AppearanceSettings(theme: $appearanceTheme, tone: $backgroundTone, scale: $textScale)
+                .frame(width: 470, height: 430)
+        }
+        .preferredColorScheme(colorScheme)
+        .tint(accent)
+        .environment(\.dynamicTypeSize, dynamicType)
+        .background(canvas)
     }
 
     @ViewBuilder private func resultRow(_ item: FileRecord) -> some View {
@@ -575,5 +612,54 @@ struct SidebarFolderRow: View {
                 store.fetchSidebarChildren(diskID: disk.id, parent: item.path) { children = $0 }
             }
         }
+    }
+}
+
+struct AppearanceSettings: View {
+    @Binding var theme: String
+    @Binding var tone: String
+    @Binding var scale: Double
+    private let themes = ["Scuro", "Chiaro", "Classico"]
+    private let tones = ["Blu", "Viola", "Verde", "Grafite", "Ardesia"]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack {
+                Image(systemName: "gearshape.fill").font(.title2)
+                Text("Impostazioni").font(.title2.bold())
+                Spacer()
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Aspetto").font(.headline)
+                Picker("Tema", selection: $theme) {
+                    ForEach(themes, id: \.self) { Text($0).tag($0) }
+                }.pickerStyle(.segmented)
+                if theme == "Scuro" {
+                    Text("Colore di sfondo").font(.subheadline.weight(.medium))
+                    Picker("Colore", selection: $tone) {
+                        ForEach(tones, id: \.self) { Text($0).tag($0) }
+                    }.pickerStyle(.segmented)
+                }
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Dimensione del testo").font(.headline)
+                    Spacer()
+                    Text("\(Int(scale * 100))%").monospacedDigit().foregroundStyle(.secondary)
+                }
+                HStack(spacing: 14) {
+                    Image(systemName: "textformat.size.smaller")
+                    Slider(value: $scale, in: 0.8...1.6, step: 0.1)
+                    Image(systemName: "textformat.size.larger")
+                }
+                Text("La modifica si applica all'intera applicazione.").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack {
+                Spacer()
+                Button("Ripristina") { theme = "Scuro"; tone = "Blu"; scale = 1.0 }
+                Button("Fine") { }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(24)
     }
 }
