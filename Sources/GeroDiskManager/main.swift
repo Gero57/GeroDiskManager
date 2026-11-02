@@ -253,6 +253,7 @@ final class CatalogStore: ObservableObject {
     @Published var searchMediaType = "Tutti" { didSet { scheduleSearch() } }
     @Published var searchMatchMode = "Nome esatto" { didSet { scheduleSearch() } }
     @Published var results: [FileRecord] = []
+    @Published var searchDiagnostic = "Ricerca non avviata"
     @Published var visibleChildren: [FileRecord] = []
     @Published var currentFolder: String?
     @Published var scanning = false
@@ -383,7 +384,8 @@ final class CatalogStore: ObservableObject {
         searchWorker = nil
 
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { results = []; return }
+        guard !q.isEmpty else { results = []; searchDiagnostic = "Inserisci un termine di ricerca"; return }
+        searchDiagnostic = "In attesa della ricerca…"
         let db = database
         searchTask = Task {
             try? await Task.sleep(nanoseconds: 450_000_000)
@@ -400,6 +402,7 @@ final class CatalogStore: ObservableObject {
             guard !Task.isCancelled else { return }
             searchWorker = nil
             results = rows
+            searchDiagnostic = "\(matchMode) • \"\(q)\" • \(rows.count) risultati"
         }
     }
 
@@ -601,7 +604,10 @@ struct MainView: View {
                 }.padding(.horizontal, 30).padding(.top, 24).padding(.bottom, 8)
 
                 if !store.searchText.isEmpty {
-                    List(store.results) { item in resultRow(item) }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(store.searchDiagnostic).appFont(.caption).foregroundStyle(.secondary)
+                        List(store.results) { item in resultRow(item) }
+                    }
                 } else if store.showingHome || store.selectedDiskRecord == nil {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 14)], spacing: 14) {
