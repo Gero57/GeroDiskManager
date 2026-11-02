@@ -142,7 +142,7 @@ struct CatalogDB {
         }
     }
 
-    func search(_ query: String, scope: String, mediaType: String) -> [FileRecord] {
+    func search(_ query: String, scope: String, mediaType: String, matchMode: String) -> [FileRecord] {
         run {
             var out: [FileRecord] = []; var s: OpaquePointer?
             let typeFilter: String
@@ -151,12 +151,16 @@ struct CatalogDB {
             case "File": typeFilter = " AND isDirectory=0"
             default: typeFilter = ""
             }
-            let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE (files.name LIKE ? ESCAPE '\\' OR files.path LIKE ? ESCAPE '\\')" + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
+            let condition = matchMode == "Nome esatto" ? "files.name = ? COLLATE NOCASE" : "(files.name LIKE ? ESCAPE '\\' OR files.path LIKE ? ESCAPE '\\')"
+            let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE " + condition + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
             sqlite3_prepare_v2(db, sql, -1, &s, nil)
             defer { sqlite3_finalize(s) }
-            let q = "%" + query.replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_") + "%"
-            bind(q, to: 1, in: s); bind(q, to: 2, in: s)
-            bind(mediaType, to: 3, in: s); bind(mediaType, to: 4, in: s)
+            let escaped = query.replacingOccurrences(of: "%", with: "\\%").replacingOccurrences(of: "_", with: "\\_")
+            let q = matchMode == "Nome esatto" ? query : "%" + escaped + "%"
+            bind(q, to: 1, in: s)
+            if matchMode != "Nome esatto" { bind(q, to: 2, in: s) }
+            let mediaIndex: Int32 = matchMode == "Nome esatto" ? 2 : 3
+            bind(mediaType, to: mediaIndex, in: s); bind(mediaType, to: mediaIndex + 1, in: s)
             while sqlite3_step(s) == SQLITE_ROW { out.append(readRecord(s)) }
             return out
         }
@@ -200,6 +204,7 @@ final class CatalogStore: ObservableObject {
     @Published var searchText = "" { didSet { scheduleSearch() } }
     @Published var searchScope = "Cartelle" { didSet { scheduleSearch() } }
     @Published var searchMediaType = "Tutti" { didSet { scheduleSearch() } }
+    @Published var searchMatchMode = "Nome esatto" { didSet { scheduleSearch() } }
     @Published var results: [FileRecord] = []
     @Published var visibleChildren: [FileRecord] = []
     @Published var currentFolder: String?
@@ -321,7 +326,8 @@ final class CatalogStore: ObservableObject {
             if Task.isCancelled { return }
             let scope = searchScope
             let mediaType = searchMediaType
-            let rows = await Task.detached { db.search(q, scope: scope, mediaType: mediaType) }.value
+            let matchMode = searchMatchMode
+            let rows = await Task.detached { db.search(q, scope: scope, mediaType: mediaType, matchMode: matchMode) }.value
             if !Task.isCancelled { results = rows }
         }
     }
@@ -461,6 +467,10 @@ struct MainView: View {
                             Text("Tutti i supporti").tag("Tutti")
                             ForEach(["HDD", "SSD", "USB", "Scheda SD", "Altro", "Non specificato"], id: \.self) { Text($0).tag($0) }
                         }.frame(width: 170)
+                        Picker("Corrispondenza", selection: $store.searchMatchMode) {
+                            Text("Nome esatto").tag("Nome esatto")
+                            Text("Contiene").tag("Contiene")
+                        }.pickerStyle(.segmented).frame(width: 190)
                         Spacer()
                     }.padding(.horizontal, 30).padding(.top, 10)
                 }
