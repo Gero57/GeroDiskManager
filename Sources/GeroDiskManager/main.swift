@@ -39,8 +39,7 @@ struct CatalogDB {
         CREATE TABLE IF NOT EXISTS disks(
           id TEXT PRIMARY KEY, name TEXT NOT NULL, rootPath TEXT NOT NULL,
           capacity INTEGER NOT NULL DEFAULT 0, itemCount INTEGER NOT NULL DEFAULT 0,
-          scannedAt REAL,
-          mediaType TEXT NOT NULL DEFAULT 'Non specificato'
+          scannedAt REAL
         );
         ALTER TABLE disks ADD COLUMN mediaType TEXT NOT NULL DEFAULT 'Non specificato';
         CREATE TABLE IF NOT EXISTS files(
