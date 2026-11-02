@@ -21,14 +21,15 @@ border.lineWidth = 8
 border.stroke()
 
 let symbol = NSImage(systemSymbolName: "externaldrive.fill", accessibilityDescription: "Gero Disk Manager")!
-let palette = NSImage.SymbolConfiguration.palette([
-    NSColor(calibratedRed: 0.16, green: 0.22, blue: 0.29, alpha: 1),
-    NSColor(calibratedRed: 0.05, green: 0.48, blue: 0.82, alpha: 1)
-])
-let config = NSImage.SymbolConfiguration(pointSize: 540, weight: .regular).applying(palette)
+let config = NSImage.SymbolConfiguration(pointSize: 540, weight: .regular)
 let styled = symbol.withSymbolConfiguration(config)!
 let rect = NSRect(x: 170, y: 205, width: 684, height: 614)
-styled.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+styled.draw(in: rect)
+    
+// Small blue status light, drawn separately for compatibility with older macOS SDKs.
+let light = NSBezierPath(ovalIn: NSRect(x: 720, y: 330, width: 54, height: 54))
+NSColor(calibratedRed: 0.05, green: 0.48, blue: 0.82, alpha: 1).setFill()
+light.fill()
 
 image.unlockFocus()
 let tiff = image.tiffRepresentation!
