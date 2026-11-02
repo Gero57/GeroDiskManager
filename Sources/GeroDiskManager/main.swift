@@ -49,6 +49,27 @@ final class CatalogStore: ObservableObject {
         }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    var selectedDiskRecord: DiskRecord? {
+        disks.first { $0.id == selectedDisk }
+    }
+
+    var selectedTree: [TreeEntry] {
+        guard let disk = selectedDiskRecord else { return [] }
+        let records = files.filter { $0.diskID == disk.id }
+        func makeChildren(parentPath: String) -> [TreeEntry] {
+            let direct = records.filter { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == parentPath }
+            return direct.sorted {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }.map { record in
+                TreeEntry(id: record.id.uuidString, name: record.name, path: record.path,
+                          isDirectory: record.isDirectory,
+                          children: record.isDirectory ? makeChildren(parentPath: record.path) : [])
+            }
+        }
+        return makeChildren(parentPath: disk.rootPath)
+    }
+
     func addDisk() {
         let panel = NSOpenPanel()
         panel.title = "Seleziona la radice del disco da catalogare"
@@ -142,6 +163,15 @@ struct Archive: Codable {
     var files: [FileRecord]
 }
 
+struct TreeEntry: Identifiable {
+    let id: String
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    let children: [TreeEntry]
+}
+
+
 @main
 struct GeroDiskManagerApp: App {
     @StateObject private var store = CatalogStore()
@@ -219,37 +249,72 @@ struct MainView: View {
                         Button("Aggiorna catalogo") { store.scan(disk) }.disabled(store.scanning)
                     }
                 }.padding(.horizontal, 30).padding(.top, 24).padding(.bottom, 8)
-                if store.searchText.isEmpty {
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 14)], spacing: 14) {
-                            ForEach(store.disks) { disk in
-                                DiskCard(disk: disk)
+                if !store.searchText.isEmpty {
+                    List(store.results) { item in
+                        HStack(spacing: 12) {
+                            Image(systemName: item.isDirectory ? "folder.fill" : "doc")
+                                .foregroundStyle(item.isDirectory ? .blue : .secondary)
+                                .frame(width: 22)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(item.name).font(.body.weight(.medium))
+                                Text(item.path).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
-                        }.padding(28)
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 3) {
+                                Text(item.diskName).font(.caption.weight(.semibold))
+                                Text(FileManager.default.fileExists(atPath: item.path) ? "Collegato" : "Offline")
+                                    .font(.caption2).foregroundStyle(FileManager.default.fileExists(atPath: item.path) ? .green : .secondary)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { store.reveal(item) }
+                        .contextMenu { Button("Mostra nel Finder") { store.reveal(item) } }
+                    }
+                    .listStyle(.inset)
+                } else if let disk = store.selectedDiskRecord {
+                    HStack {
+                        Label(disk.name, systemImage: "externaldrive.fill").font(.headline)
+                        Spacer()
+                        Text("\(store.selectedTree.count) elementi al primo livello")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(.horizontal, 28).padding(.top, 14)
+                    if store.selectedTree.isEmpty {
+                        ContentUnavailableView("Catalogo vuoto", systemImage: "folder",
+                            description: Text("Aggiorna il catalogo per leggere la struttura del disco."))
+                    } else {
+                        List {
+                            OutlineGroup(store.selectedTree, children: \.children) { node in
+                                HStack(spacing: 8) {
+                                    Image(systemName: node.isDirectory ? "folder.fill" : "doc")
+                                        .foregroundStyle(node.isDirectory ? .blue : .secondary)
+                                    Text(node.name)
+                                    Spacer()
+                                    if !FileManager.default.fileExists(atPath: node.path) {
+                                        Text("Offline").font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                                .onTapGesture(count: 2) {
+                                    let record = FileRecord(diskID: disk.id, diskName: disk.name,
+                                        name: node.name, path: node.path, isDirectory: node.isDirectory)
+                                    store.reveal(record)
+                                }
+                                .contextMenu {
+                                    Button("Mostra nel Finder") {
+                                        let record = FileRecord(diskID: disk.id, diskName: disk.name,
+                                            name: node.name, path: node.path, isDirectory: node.isDirectory)
+                                        store.reveal(record)
+                                    }
+                                }
+                            }
+                        }
+                        .listStyle(.inset)
                     }
                 } else {
-                    Table(store.results) {
-                        TableColumn("Nome") { item in
-                            Label(item.name, systemImage: item.isDirectory ? "folder" : "doc")
-                                .lineLimit(1)
-                        }
-                        TableColumn("Disco") { item in Text(item.diskName).lineLimit(1) }
-                        TableColumn("Percorso") { item in
-                            Text(item.path.replacingOccurrences(of: item.diskName, with: ""))
-                                .foregroundStyle(.secondary).lineLimit(1)
-                        }
-                        TableColumn("Stato") { item in
-                            Text(FileManager.default.fileExists(atPath: item.path) ? "Collegato" : "Offline")
-                                .foregroundStyle(FileManager.default.fileExists(atPath: item.path) ? .green : .secondary)
-                        }
-                    }
-                    .onTapGesture(count: 2) {
-                        if let item = store.results.first { store.reveal(item) }
-                    }
-                    .contextMenu(forSelectionType: FileRecord.ID.self) { ids in
-                        if let id = ids.first, let item = store.results.first(where: { $0.id == id }) {
-                            Button("Mostra nel Finder") { store.reveal(item) }
-                        }
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 14)], spacing: 14) {
+                            ForEach(store.disks) { disk in DiskCard(disk: disk) }
+                        }.padding(28)
                     }
                 }
                 HStack {
