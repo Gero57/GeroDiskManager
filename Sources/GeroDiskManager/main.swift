@@ -401,27 +401,60 @@ final class CatalogStore: ObservableObject {
     }
 }
 
+
+private struct AppTextScaleKey: EnvironmentKey {
+    static let defaultValue: Double = 1.35
+}
+
+private extension EnvironmentValues {
+    var appTextScale: Double {
+        get { self[AppTextScaleKey.self] }
+        set { self[AppTextScaleKey.self] = newValue }
+    }
+}
+
+private struct AppScaledFont: ViewModifier {
+    @Environment(\.appTextScale) private var scale
+    let style: Font.TextStyle
+    var weight: Font.Weight = .regular
+
+    private var baseSize: CGFloat {
+        switch style {
+        case .largeTitle: return 34
+        case .title: return 28
+        case .title2: return 22
+        case .title3: return 20
+        case .headline: return 17
+        case .subheadline: return 16
+        case .body: return 16
+        case .callout: return 16
+        case .footnote: return 14
+        case .caption: return 14
+        case .caption2: return 13
+        @unknown default: return 16
+        }
+    }
+
+    func body(content: Content) -> some View {
+        content.font(.system(size: baseSize * scale, weight: weight))
+    }
+}
+
+private extension View {
+    func appFont(_ style: Font.TextStyle, weight: Font.Weight = .regular) -> some View {
+        modifier(AppScaledFont(style: style, weight: weight))
+    }
+}
+
 struct MainView: View {
     @EnvironmentObject var store: CatalogStore
     @AppStorage("appearanceTheme") private var appearanceTheme = "Scuro"
     @AppStorage("backgroundTone") private var backgroundTone = "Blu"
-    @AppStorage("textScale") private var textScale = 1.0
+    @AppStorage("textScaleV2") private var textScale = 1.35
     @State private var showingSettings = false
     @State private var isReordering = false
     @State private var diskPendingDeletion: DiskRecord?
     private var colorScheme: ColorScheme? { appearanceTheme == "Chiaro" ? .light : .dark }
-    private var dynamicType: DynamicTypeSize {
-        // Scala decisamente più ampia: il valore standard parte da XXXLarge
-        // e i livelli superiori usano le dimensioni di accessibilità di macOS.
-        // Si applica anche alle liste dei dischi e ai contenuti delle cartelle.
-        switch textScale {
-        case ..<0.9: return .xxLarge
-        case ..<1.1: return .xxxLarge
-        case ..<1.3: return .accessibility1
-        case ..<1.5: return .accessibility2
-        default: return .accessibility3
-        }
-    }
     private var accent: Color { appearanceTheme == "Classico" ? Color(red: 0.66, green: 0.46, blue: 0.22) : Color.accentColor }
     private var canvas: Color {
         if appearanceTheme == "Classico" { return Color(red: 0.20, green: 0.17, blue: 0.13) }
@@ -438,7 +471,7 @@ struct MainView: View {
         NavigationSplitView {
             VStack(spacing: 8) {
                 HStack {
-                    Text("CATALOGHI").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text("CATALOGHI").appFont(.caption, weight: .semibold).foregroundStyle(.secondary)
                     Spacer()
                     Button { isReordering.toggle() } label: { Image(systemName: isReordering ? "checkmark" : "arrow.up.arrow.down") }.buttonStyle(.borderless).help(isReordering ? "Fine riordino" : "Riordina cataloghi")
                     Button(action: store.addDisk) { Image(systemName: "plus") }.buttonStyle(.borderless).help("Aggiungi disco")
@@ -478,24 +511,24 @@ struct MainView: View {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Gero Disk Manager").font(.largeTitle.bold())
+                        Text("Gero Disk Manager").appFont(.largeTitle, weight: .bold)
                         Text("Un'unica ricerca in tutti i tuoi dischi, anche offline.").foregroundStyle(.secondary)
                     }
                     Button { showingSettings = true } label: {
-                        Image(systemName: "gearshape").font(.title2)
+                        Image(systemName: "gearshape").appFont(.title2)
                     }.buttonStyle(.borderless).help("Impostazioni")
                     Spacer()
                     if store.scanning {
                         VStack(alignment: .trailing) {
                             ProgressView()
-                            Text("\(store.progress.formatted()) voci").font(.caption2).foregroundStyle(.secondary)
+                            Text("\(store.progress.formatted()) voci").appFont(.caption2).foregroundStyle(.secondary)
                         }
                     }
                 }.padding(.horizontal, 28).padding(.top, 26).padding(.bottom, 20)
 
                 HStack {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Cerca un file o una cartella…", text: $store.searchText).textFieldStyle(.plain).font(.title3)
+                    TextField("Cerca un file o una cartella…", text: $store.searchText).textFieldStyle(.plain).appFont(.title3)
                     if !store.searchText.isEmpty {
                         Button { store.searchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain)
                     }
@@ -504,7 +537,7 @@ struct MainView: View {
 
                 if !store.searchText.isEmpty {
                     HStack(spacing: 12) {
-                        Text("Mostra:").font(.caption).foregroundStyle(.secondary)
+                        Text("Mostra:").appFont(.caption).foregroundStyle(.secondary)
                         Picker("Tipo di risultato", selection: $store.searchScope) {
                             Text("Cartelle").tag("Cartelle")
                             Text("File").tag("File")
@@ -524,7 +557,7 @@ struct MainView: View {
 
                 HStack {
                     Text(store.searchText.isEmpty ? (store.showingHome ? "I TUOI DISCHI" : "CONTENUTO DEL DISCO") : "RISULTATI (MASSIMO 1.000)")
-                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        .appFont(.caption, weight: .semibold).foregroundStyle(.secondary)
                     Spacer()
                     if let disk = store.selectedDiskRecord, !store.showingHome {
                         Button("Aggiorna catalogo") { store.scan(disk) }.disabled(store.scanning || !disk.isAvailable)
@@ -540,13 +573,13 @@ struct MainView: View {
                                 VStack(alignment: .leading, spacing: 12) {
                                     HStack {
                                         Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive")
-                                            .font(.title2).foregroundStyle(disk.isAvailable ? .green : .secondary)
+                                            .appFont(.title2).foregroundStyle(disk.isAvailable ? .green : .secondary)
                                         Spacer()
                                         Circle().fill(disk.isAvailable ? .green : .gray).frame(width: 8, height: 8)
                                     }
-                                    Text(disk.name).font(.headline).lineLimit(1)
-                                    Text("\(disk.itemCount.formatted()) elementi").font(.subheadline).foregroundStyle(.secondary)
-                                    Text(disk.isAvailable ? "Collegato" : "Offline").font(.caption).foregroundStyle(.secondary)
+                                    Text(disk.name).appFont(.headline).lineLimit(1)
+                                    Text("\(disk.itemCount.formatted()) elementi").appFont(.subheadline).foregroundStyle(.secondary)
+                                    Text(disk.isAvailable ? "Collegato" : "Offline").appFont(.caption).foregroundStyle(.secondary)
                                     Picker("Supporto", selection: Binding(
                                         get: { store.disks.first(where: { $0.id == disk.id })?.mediaType ?? "Non specificato" },
                                         set: { store.setMediaType($0, for: disk) }
@@ -571,9 +604,9 @@ struct MainView: View {
                         Button(action: store.goUp) { Image(systemName: "arrow.up") }
                             .disabled(store.currentFolder == disk.rootPath)
                         Text(store.currentFolder == disk.rootPath ? disk.name : URL(fileURLWithPath: store.currentFolder ?? disk.rootPath).lastPathComponent)
-                            .font(.headline)
+                            .appFont(.headline)
                         Spacer()
-                        Text("\(disk.itemCount.formatted()) elementi indicizzati").font(.caption).foregroundStyle(.secondary)
+                        Text("\(disk.itemCount.formatted()) elementi indicizzati").appFont(.caption).foregroundStyle(.secondary)
                     }.padding(.horizontal, 28).padding(.top, 12)
 
                     List(store.visibleChildren) { item in
@@ -584,7 +617,7 @@ struct MainView: View {
                             Spacer()
                             if !item.isDirectory {
                                 Text(item.path.components(separatedBy: "/").dropLast().joined(separator: "/"))
-                                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                    .appFont(.caption2).foregroundStyle(.secondary).lineLimit(1)
                             }
                         }
                         .contentShape(Rectangle())
@@ -597,9 +630,9 @@ struct MainView: View {
                 }
 
                 HStack {
-                    Text(store.status).font(.caption).foregroundStyle(.secondary)
+                    Text(store.status).appFont(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Text("\(store.disks.count) dischi").font(.caption).foregroundStyle(.secondary)
+                    Text("\(store.disks.count) dischi").appFont(.caption).foregroundStyle(.secondary)
                 }.padding(.horizontal, 20).padding(.vertical, 10).background(.bar)
             }
         }
@@ -621,7 +654,7 @@ struct MainView: View {
         }
         .preferredColorScheme(colorScheme)
         .tint(accent)
-        .environment(\.dynamicTypeSize, dynamicType)
+        .environment(\.appTextScale, textScale)
         .background(canvas)
     }
 
@@ -630,14 +663,14 @@ struct MainView: View {
             Image(systemName: item.isDirectory ? "folder.fill" : "doc")
                 .foregroundStyle(item.isDirectory ? .blue : .secondary).frame(width: 22)
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.name).font(.body.weight(.medium))
-                Text(item.path).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(item.name).appFont(.body, weight: .medium)
+                Text(item.path).appFont(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
-                Text(item.diskName).font(.caption.weight(.semibold))
+                Text(item.diskName).appFont(.caption, weight: .semibold)
                 Text(FileManager.default.fileExists(atPath: item.path) ? "Collegato" : "Offline")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .appFont(.caption2).foregroundStyle(.secondary)
             }
         }
         .contentShape(Rectangle()).onTapGesture(count: 2) { store.reveal(item) }
@@ -681,7 +714,7 @@ struct DiskSidebarSection: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(disk.name).lineLimit(1)
                             Text("\(disk.itemCount.formatted()) elementi · \(disk.isAvailable ? "Collegato" : "Offline")")
-                                .font(.caption2).foregroundStyle(.secondary)
+                                .appFont(.caption2).foregroundStyle(.secondary)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -696,7 +729,7 @@ struct DiskSidebarSection: View {
                         Button(action: onMoveDown) { Image(systemName: "chevron.down") }
                             .buttonStyle(.borderless).disabled(!canMoveDown).help("Sposta in basso")
                     }
-                    .font(.caption2)
+                    .appFont(.caption2)
                 }
             }
         }
@@ -758,17 +791,17 @@ struct AppearanceSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             HStack {
-                Image(systemName: "gearshape.fill").font(.title2)
-                Text("Impostazioni").font(.title2.bold())
+                Image(systemName: "gearshape.fill").appFont(.title2)
+                Text("Impostazioni").appFont(.title2, weight: .bold)
                 Spacer()
             }
             VStack(alignment: .leading, spacing: 12) {
-                Text("Aspetto").font(.headline)
+                Text("Aspetto").appFont(.headline)
                 Picker("Tema", selection: $theme) {
                     ForEach(themes, id: \.self) { Text($0).tag($0) }
                 }.pickerStyle(.segmented)
                 if theme == "Scuro" {
-                    Text("Colore di sfondo").font(.subheadline.weight(.medium))
+                    Text("Colore di sfondo").appFont(.subheadline, weight: .medium)
                     Picker("Colore", selection: $tone) {
                         ForEach(tones, id: \.self) { Text($0).tag($0) }
                     }.pickerStyle(.segmented)
@@ -777,21 +810,21 @@ struct AppearanceSettings: View {
             Divider()
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text("Dimensione del testo").font(.headline)
+                    Text("Dimensione del testo").appFont(.headline)
                     Spacer()
                     Text("\(Int(scale * 100))%").monospacedDigit().foregroundStyle(.secondary)
                 }
                 HStack(spacing: 14) {
                     Image(systemName: "textformat.size.smaller")
-                    Slider(value: $scale, in: 0.8...1.6, step: 0.1)
+                    Slider(value: $scale, in: 1.0...1.8, step: 0.1)
                     Image(systemName: "textformat.size.larger")
                 }
-                Text("La modifica si applica all'intera applicazione.").font(.caption).foregroundStyle(.secondary)
+                Text("La modifica si applica all'intera applicazione.").appFont(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             HStack {
                 Spacer()
-                Button("Ripristina") { theme = "Scuro"; tone = "Blu"; scale = 1.0 }
+                Button("Ripristina") { theme = "Scuro"; tone = "Blu"; scale = 1.35 }
                 Button("Chiudi") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }.padding(24)
