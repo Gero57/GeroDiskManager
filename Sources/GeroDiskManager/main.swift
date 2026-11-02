@@ -616,6 +616,7 @@ struct SidebarFolderRow: View {
 }
 
 struct AppearanceSettings: View {
+    @Environment(\.dismiss) private var dismiss
     @Binding var theme: String
     @Binding var tone: String
     @Binding var scale: Double
@@ -658,7 +659,7 @@ struct AppearanceSettings: View {
             HStack {
                 Spacer()
                 Button("Ripristina") { theme = "Scuro"; tone = "Blu"; scale = 1.0 }
-                Button("Fine") { }.keyboardShortcut(.defaultAction)
+                Button("Chiudi") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }.padding(24)
     }
