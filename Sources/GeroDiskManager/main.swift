@@ -508,7 +508,7 @@ struct DiskSidebarSection: View {
                     AnyView(SidebarFolderRow(disk: disk, item: item, depth: 1))
                 } else {
                     AnyView(Button {
-                        store.selectFolder(disk, path: item.path)
+                        store.reveal(item)
                     } label: {
                         Label(item.name, systemImage: "doc").lineLimit(1)
                     }.buttonStyle(.plain).padding(.leading, 18))
@@ -554,7 +554,7 @@ struct SidebarFolderRow: View {
                     AnyView(SidebarFolderRow(disk: disk, item: child, depth: depth + 1))
                 } else {
                     AnyView(Button {
-                        store.selectFolder(disk, path: child.path)
+                        store.reveal(child)
                     } label: {
                         Label(child.name, systemImage: "doc").lineLimit(1)
                     }.buttonStyle(.plain).padding(.leading, 18))
