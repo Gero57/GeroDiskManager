@@ -340,17 +340,21 @@ final class CatalogStore: ObservableObject {
                 }
             }
             flushFiles()
-            await MainActor.run { self.progress = count; self.status = "Catalogati \(count.formatted()) elementi…" }
-                }
+            let finalCount = total
+            await MainActor.run {
+                self.progress = finalCount
+                self.status = "Catalogati \(finalCount.formatted()) elementi…"
             }
-            if !batch.isEmpty { db.insertBatch(disk: disk, records: batch); total += batch.count }
             await MainActor.run {
                 if let i = self.disks.firstIndex(where: { $0.id == disk.id }) {
-                    self.disks[i].itemCount = total; self.disks[i].scannedAt = Date()
+                    self.disks[i].itemCount = total
+                    self.disks[i].scannedAt = Date()
                     db.upsert(self.disks[i])
                 }
-                self.scanning = false; self.status = "Catalogazione completata: \(total.formatted()) elementi"
-                self.loadChildren(); self.scheduleSearch()
+                self.scanning = false
+                self.status = "Catalogazione completata: \(total.formatted()) elementi"
+                self.loadChildren()
+                self.scheduleSearch()
             }
         }
     }
