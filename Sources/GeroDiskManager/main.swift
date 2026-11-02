@@ -12,6 +12,7 @@ struct DiskRecord: Identifiable, Codable, Hashable {
     var itemCount: Int
     var scannedAt: Date?
     var mediaType: String = "Non specificato"
+    var sortOrder: Int = 0
     var isAvailable: Bool { FileManager.default.fileExists(atPath: rootPath) }
 }
 
@@ -42,6 +43,7 @@ struct CatalogDB {
           scannedAt REAL
         );
         ALTER TABLE disks ADD COLUMN mediaType TEXT NOT NULL DEFAULT 'Non specificato';
+        ALTER TABLE disks ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0;
         CREATE TABLE IF NOT EXISTS files(
           id INTEGER PRIMARY KEY AUTOINCREMENT, diskID TEXT NOT NULL,
           diskName TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL,
@@ -59,7 +61,7 @@ struct CatalogDB {
         run {
             var out: [DiskRecord] = []
             var stmt: OpaquePointer?
-            sqlite3_prepare_v2(db, "SELECT id,name,rootPath,capacity,itemCount,scannedAt,mediaType FROM disks ORDER BY name COLLATE NOCASE", -1, &stmt, nil)
+            sqlite3_prepare_v2(db, "SELECT id,name,rootPath,capacity,itemCount,scannedAt,mediaType,sortOrder FROM disks ORDER BY sortOrder,name COLLATE NOCASE", -1, &stmt, nil)
             defer { sqlite3_finalize(stmt) }
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let id = String(cString: sqlite3_column_text(stmt, 0))
@@ -69,7 +71,8 @@ struct CatalogDB {
                     capacity: sqlite3_column_int64(stmt, 3),
                     itemCount: Int(sqlite3_column_int64(stmt, 4)),
                     scannedAt: sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5)),
-                    mediaType: String(cString: sqlite3_column_text(stmt, 6))))
+                    mediaType: String(cString: sqlite3_column_text(stmt, 6)),
+                    sortOrder: Int(sqlite3_column_int(stmt, 7))))
             }
             return out
         }
@@ -78,12 +81,12 @@ struct CatalogDB {
     func upsert(_ disk: DiskRecord) {
         run {
             var s: OpaquePointer?
-            sqlite3_prepare_v2(db, "INSERT INTO disks(id,name,rootPath,capacity,itemCount,scannedAt,mediaType) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,rootPath=excluded.rootPath,capacity=excluded.capacity,itemCount=excluded.itemCount,scannedAt=excluded.scannedAt,mediaType=excluded.mediaType", -1, &s, nil)
+            sqlite3_prepare_v2(db, "INSERT INTO disks(id,name,rootPath,capacity,itemCount,scannedAt,mediaType,sortOrder) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,rootPath=excluded.rootPath,capacity=excluded.capacity,itemCount=excluded.itemCount,scannedAt=excluded.scannedAt,mediaType=excluded.mediaType,sortOrder=excluded.sortOrder", -1, &s, nil)
             defer { sqlite3_finalize(s) }
             bind(disk.id.uuidString, to: 1, in: s); bind(disk.name, to: 2, in: s); bind(disk.rootPath, to: 3, in: s)
             sqlite3_bind_int64(s, 4, disk.capacity); sqlite3_bind_int64(s, 5, Int64(disk.itemCount))
             if let date = disk.scannedAt { sqlite3_bind_double(s, 6, date.timeIntervalSince1970) } else { sqlite3_bind_null(s, 6) }
-            bind(disk.mediaType, to: 7, in: s)
+            bind(disk.mediaType, to: 7, in: s); sqlite3_bind_int(s, 8, Int32(disk.sortOrder))
             sqlite3_step(s)
         }
     }
@@ -214,7 +217,15 @@ final class CatalogStore: ObservableObject {
     private let database = CatalogDB()
     private var searchTask: Task<Void, Never>?
 
-    init() { disks = database.disks() }
+    init() {
+        disks = database.disks()
+        for index in disks.indices { disks[index].sortOrder = index; database.upsert(disks[index]) }
+    }
+
+    func moveDisks(from source: IndexSet, to destination: Int) {
+        disks.move(fromOffsets: source, toOffset: destination)
+        for index in disks.indices { disks[index].sortOrder = index; database.upsert(disks[index]) }
+    }
 
     var selectedDiskRecord: DiskRecord? { disks.first { $0.id == selectedDisk } }
 
@@ -228,7 +239,7 @@ final class CatalogStore: ObservableObject {
         guard !disks.contains(where: { $0.rootPath == root.path }) else { status = "Disco già presente"; return }
         let values = try? root.resourceValues(forKeys: [.volumeNameKey, .volumeTotalCapacityKey])
         let disk = DiskRecord(id: UUID(), name: values?.volumeName ?? root.lastPathComponent,
-            rootPath: root.path, capacity: Int64(values?.volumeTotalCapacity ?? 0), itemCount: 0, scannedAt: nil)
+            rootPath: root.path, capacity: Int64(values?.volumeTotalCapacity ?? 0), itemCount: 0, scannedAt: nil, sortOrder: disks.count)
         disks.append(disk); selectedDisk = disk.id; currentFolder = disk.rootPath
         database.upsert(disk); loadChildren()
         scan(disk)
@@ -342,6 +353,7 @@ final class CatalogStore: ObservableObject {
     func remove(_ disk: DiskRecord) {
         database.removeDisk(disk.id); disks.removeAll { $0.id == disk.id }
         if selectedDisk == disk.id { selectedDisk = nil; currentFolder = nil; visibleChildren = [] }
+        for index in disks.indices { disks[index].sortOrder = index; database.upsert(disks[index]) }
         status = "Catalogo rimosso"
     }
 
@@ -371,6 +383,8 @@ struct MainView: View {
     @AppStorage("backgroundTone") private var backgroundTone = "Blu"
     @AppStorage("textScale") private var textScale = 1.0
     @State private var showingSettings = false
+    @State private var isReordering = false
+    @State private var diskPendingDeletion: DiskRecord?
     private var colorScheme: ColorScheme? { appearanceTheme == "Chiaro" ? .light : .dark }
     private var dynamicType: DynamicTypeSize {
         switch textScale {
@@ -400,6 +414,7 @@ struct MainView: View {
                 HStack {
                     Text("CATALOGHI").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     Spacer()
+                    Button { isReordering.toggle() } label: { Image(systemName: isReordering ? "checkmark" : "arrow.up.arrow.down") }.buttonStyle(.borderless).help(isReordering ? "Fine riordino" : "Riordina cataloghi")
                     Button(action: store.addDisk) { Image(systemName: "plus") }.buttonStyle(.borderless).help("Aggiungi disco")
                 }.padding(.horizontal, 14).padding(.top, 16)
 
@@ -415,12 +430,15 @@ struct MainView: View {
                         DiskSidebarSection(
                             disk: disk,
                             selected: store.selectedDisk == disk.id && !store.showingHome,
-                            onSelect: { store.select(disk) }
+                            onSelect: { store.select(disk) },
+                            onDelete: { diskPendingDeletion = disk }
                         )
                         .listRowSeparator(.hidden)
                     }
+                    .onMove(perform: store.moveDisks)
                 }
                 .listStyle(.sidebar)
+                .environment(\.editMode, .constant(isReordering ? .active : .inactive))
 
                 Button(action: store.addDisk) {
                     Label("Aggiungi disco", systemImage: "plus.circle.fill").frame(maxWidth: .infinity)
@@ -556,6 +574,18 @@ struct MainView: View {
                 }.padding(.horizontal, 20).padding(.vertical, 10).background(.bar)
             }
         }
+        .confirmationDialog("Eliminare questo catalogo?", isPresented: Binding(
+            get: { diskPendingDeletion != nil },
+            set: { if !$0 { diskPendingDeletion = nil } }
+        ), titleVisibility: .visible) {
+            Button("Elimina catalogo", role: .destructive) {
+                if let disk = diskPendingDeletion { store.remove(disk) }
+                diskPendingDeletion = nil
+            }
+            Button("Annulla", role: .cancel) { diskPendingDeletion = nil }
+        } message: {
+            Text("Verranno eliminati solo i dati indicizzati da Gero Disk Manager. I file originali sul disco non verranno toccati.")
+        }
         .sheet(isPresented: $showingSettings) {
             AppearanceSettings(theme: $appearanceTheme, tone: $backgroundTone, scale: $textScale)
                 .frame(width: 470, height: 430)
@@ -591,6 +621,7 @@ struct DiskSidebarSection: View {
     let disk: DiskRecord
     let selected: Bool
     let onSelect: () -> Void
+    let onDelete: () -> Void
     @State private var expanded = false
     @State private var children: [FileRecord] = []
 
@@ -624,6 +655,7 @@ struct DiskSidebarSection: View {
                 .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
             }.buttonStyle(.plain)
         }
+        .contextMenu { Button("Elimina catalogo", role: .destructive, action: onDelete) }
         .onChange(of: expanded) { value in
             if value {
                 store.fetchSidebarChildren(diskID: disk.id, parent: disk.rootPath) { children = $0 }
