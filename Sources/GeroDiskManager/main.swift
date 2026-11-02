@@ -411,13 +411,13 @@ struct MainView: View {
     @State private var diskPendingDeletion: DiskRecord?
     private var colorScheme: ColorScheme? { appearanceTheme == "Chiaro" ? .light : .dark }
     private var dynamicType: DynamicTypeSize {
-        // Una dimensione di base più leggibile in tutta l'interfaccia.
+        // Dimensione di base ulteriormente aumentata per rendere più leggibili
+        // etichette, nomi e dettagli in tutta l'interfaccia.
         // Il cursore nelle impostazioni continua a regolare la dimensione complessiva.
         switch textScale {
-        case ..<0.85: return .medium
-        case ..<1.0: return .large
-        case ..<1.15: return .xLarge
-        case ..<1.3: return .xxLarge
+        case ..<0.85: return .large
+        case ..<1.0: return .xLarge
+        case ..<1.15: return .xxLarge
         default: return .xxxLarge
         }
     }
