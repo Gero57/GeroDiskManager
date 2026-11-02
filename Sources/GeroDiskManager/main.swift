@@ -42,13 +42,34 @@ struct CatalogDB {
           capacity INTEGER NOT NULL DEFAULT 0, itemCount INTEGER NOT NULL DEFAULT 0,
           scannedAt REAL
         );
-        ALTER TABLE disks ADD COLUMN mediaType TEXT NOT NULL DEFAULT 'Non specificato';
-        ALTER TABLE disks ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0;
         CREATE TABLE IF NOT EXISTS files(
           id INTEGER PRIMARY KEY AUTOINCREMENT, diskID TEXT NOT NULL,
           diskName TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL,
           parentPath TEXT NOT NULL, isDirectory INTEGER NOT NULL
         );
+        """, nil, nil, nil)
+
+        func hasColumn(_ name: String) -> Bool {
+            var statement: OpaquePointer?
+            defer { sqlite3_finalize(statement) }
+            guard sqlite3_prepare_v2(db, "PRAGMA table_info(disks)", -1, &statement, nil) == SQLITE_OK else { return false }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let raw = sqlite3_column_text(statement, 1),
+                   String(cString: raw).caseInsensitiveCompare(name) == .orderedSame {
+                    return true
+                }
+            }
+            return false
+        }
+
+        if !hasColumn("mediaType") {
+            sqlite3_exec(db, "ALTER TABLE disks ADD COLUMN mediaType TEXT NOT NULL DEFAULT 'Non specificato'", nil, nil, nil)
+        }
+        if !hasColumn("sortOrder") {
+            sqlite3_exec(db, "ALTER TABLE disks ADD COLUMN sortOrder INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
+        }
+
+        sqlite3_exec(db, """
         CREATE INDEX IF NOT EXISTS idx_files_disk_parent ON files(diskID,parentPath,isDirectory,name COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_files_name ON files(name COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
