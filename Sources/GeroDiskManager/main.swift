@@ -168,6 +168,9 @@ struct CatalogDB {
 
     func search(_ query: String, scope: String, mediaType: String, matchMode: String) -> [FileRecord] {
         run {
+            // Le ricerche obsolete vengono scartate appena arrivano in coda,
+            // così non bloccano la navigazione tra dischi e cartelle.
+            guard !Task.isCancelled else { return [] }
             var out: [FileRecord] = []; var s: OpaquePointer?
             let typeFilter: String
             switch scope {
@@ -236,7 +239,7 @@ final class CatalogStore: ObservableObject {
     @Published var progress = 0
     @Published var status = "Aggiungi un disco per iniziare"
     private let database = CatalogDB()
-    private var searchTask: Task<Void, Never>?
+    private var searchTask: Task<Void, Never>?\n    private var searchWorker: Task<[FileRecord], Never>?
 
     init() {
         disks = database.disks()
@@ -352,18 +355,30 @@ final class CatalogStore: ObservableObject {
     }
 
     private func scheduleSearch() {
+        // Annulla sia l'attesa sia l'eventuale query precedente.
+        // Il worker controlla la cancellazione quando entra nella coda SQLite.
         searchTask?.cancel()
+        searchWorker?.cancel()
+        searchWorker = nil
+
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { results = []; return }
         let db = database
         searchTask = Task {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            if Task.isCancelled { return }
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled else { return }
+
             let scope = searchScope
             let mediaType = searchMediaType
             let matchMode = searchMatchMode
-            let rows = await Task.detached { db.search(q, scope: scope, mediaType: mediaType, matchMode: matchMode) }.value
-            if !Task.isCancelled { results = rows }
+            let worker = Task.detached(priority: .userInitiated) {
+                db.search(q, scope: scope, mediaType: mediaType, matchMode: matchMode)
+            }
+            searchWorker = worker
+            let rows = await worker.value
+            guard !Task.isCancelled else { return }
+            searchWorker = nil
+            results = rows
         }
     }
 
