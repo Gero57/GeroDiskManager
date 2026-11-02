@@ -467,7 +467,7 @@ struct MainView: View {
                             Text("Tutti i supporti").tag("Tutti")
                             ForEach(["HDD", "SSD", "USB", "Scheda SD", "Altro", "Non specificato"], id: \.self) { Text($0).tag($0) }
                         }.frame(width: 170)
-                        Picker("Corrispondenza", selection: $store.searchMatchMode) {
+                        Picker("", selection: $store.searchMatchMode) {
                             Text("Nome esatto").tag("Nome esatto")
                             Text("Contiene").tag("Contiene")
                         }.pickerStyle(.segmented).frame(width: 190)
