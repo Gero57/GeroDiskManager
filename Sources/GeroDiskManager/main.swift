@@ -191,17 +191,13 @@ struct CatalogDB {
         }
         let condition = matchMode == "Nome esatto"
             ? "files.name = ? COLLATE NOCASE"
-            : "(files.name LIKE ? ESCAPE '\\' OR files.path LIKE ? ESCAPE '\\')"
+            : "(instr(lower(files.name), lower(?)) > 0 OR instr(lower(files.path), lower(?)) > 0)"
         let sql = "SELECT files.id,files.diskID,files.diskName,files.name,files.path,files.isDirectory FROM files JOIN disks ON disks.id=files.diskID WHERE " + condition + typeFilter + " AND (?='Tutti' OR disks.mediaType=?) ORDER BY files.isDirectory DESC,files.name COLLATE NOCASE LIMIT 1000"
         guard sqlite3_prepare_v2(searchDB, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }
 
-        let escaped = query.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "%", with: "\\%")
-            .replacingOccurrences(of: "_", with: "\\_")
-        let value = matchMode == "Nome esatto" ? query : "%" + escaped + "%"
-        bind(value, to: 1, in: statement)
-        if matchMode != "Nome esatto" { bind(value, to: 2, in: statement) }
+        bind(query, to: 1, in: statement)
+        if matchMode != "Nome esatto" { bind(query, to: 2, in: statement) }
         let mediaIndex: Int32 = matchMode == "Nome esatto" ? 2 : 3
         bind(mediaType, to: mediaIndex, in: statement)
         bind(mediaType, to: mediaIndex + 1, in: statement)
