@@ -411,14 +411,15 @@ struct MainView: View {
     @State private var diskPendingDeletion: DiskRecord?
     private var colorScheme: ColorScheme? { appearanceTheme == "Chiaro" ? .light : .dark }
     private var dynamicType: DynamicTypeSize {
-        // Dimensione di base ulteriormente aumentata per rendere più leggibili
-        // etichette, nomi e dettagli in tutta l'interfaccia.
-        // Il cursore nelle impostazioni continua a regolare la dimensione complessiva.
+        // Scala decisamente più ampia: il valore standard parte da XXXLarge
+        // e i livelli superiori usano le dimensioni di accessibilità di macOS.
+        // Si applica anche alle liste dei dischi e ai contenuti delle cartelle.
         switch textScale {
-        case ..<0.85: return .large
-        case ..<1.0: return .xLarge
-        case ..<1.15: return .xxLarge
-        default: return .xxxLarge
+        case ..<0.9: return .xxLarge
+        case ..<1.1: return .xxxLarge
+        case ..<1.3: return .accessibility1
+        case ..<1.5: return .accessibility2
+        default: return .accessibility3
         }
     }
     private var accent: Color { appearanceTheme == "Classico" ? Color(red: 0.66, green: 0.46, blue: 0.22) : Color.accentColor }
