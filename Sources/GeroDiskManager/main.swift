@@ -660,6 +660,8 @@ struct MainView: View {
                         Text("\(disk.itemCount.formatted()) elementi indicizzati").appFont(.caption).foregroundStyle(.secondary)
                     }.padding(.horizontal, 28).padding(.top, 12)
 
+                    diskSpacePanel(disk)
+
                     List(store.visibleChildren) { item in
                         HStack {
                             Image(systemName: item.isDirectory ? "folder.fill" : "doc")
@@ -751,6 +753,45 @@ struct MainView: View {
         .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
         .contextMenu { Button("Rimuovi catalogo", role: .destructive) { diskPendingDeletion = disk } }
+    }
+
+    @ViewBuilder
+    private func diskSpacePanel(_ disk: DiskRecord) -> some View {
+        if disk.isAvailable,
+           let values = try? URL(fileURLWithPath: disk.rootPath).resourceValues(forKeys: [.volumeAvailableCapacityKey, .volumeTotalCapacityKey]),
+           let availableValue = values.volumeAvailableCapacity {
+            let total = Int64(values.volumeTotalCapacity ?? Int(disk.capacity))
+            let free = max(Int64(availableValue), 0)
+            let safeTotal = max(total, 1)
+            let usedFraction = min(max(Double(safeTotal - free) / Double(safeTotal), 0), 1)
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle().stroke(Color.secondary.opacity(0.18), lineWidth: 11)
+                    Circle().trim(from: 0, to: usedFraction)
+                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 11, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    Image(systemName: "externaldrive.fill").font(.title2).foregroundStyle(.secondary)
+                }
+                .frame(width: 66, height: 66)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Spazio disponibile").appFont(.caption).foregroundStyle(.secondary)
+                    Text(ByteCountFormatter.string(fromByteCount: free, countStyle: .file))
+                        .appFont(.title3, weight: .semibold)
+                    Text("di \(ByteCountFormatter.string(fromByteCount: safeTotal, countStyle: .file))")
+                        .appFont(.caption).foregroundStyle(.secondary)
+                    Text("\(Int((usedFraction * 100).rounded()))% occupato")
+                        .appFont(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 28).padding(.vertical, 12)
+        } else if !disk.isAvailable {
+            HStack(spacing: 8) {
+                Image(systemName: "externaldrive").foregroundStyle(.secondary)
+                Text("Spazio disponibile visibile quando il disco è collegato")
+                    .appFont(.caption).foregroundStyle(.secondary)
+            }.padding(.horizontal, 28).padding(.vertical, 12)
+        }
     }
 
     @ViewBuilder private func resultRow(_ item: FileRecord) -> some View {
