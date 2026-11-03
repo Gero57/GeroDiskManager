@@ -638,36 +638,12 @@ struct MainView: View {
                     }
                 } else if store.showingHome || store.selectedDiskRecord == nil {
                     ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 14)], spacing: 14) {
-                            ForEach(store.disks) { disk in
-                                VStack(alignment: .leading, spacing: 12) {
-                                    HStack {
-                                        Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive")
-                                            .appFont(.title2).foregroundStyle(disk.isAvailable ? .green : .secondary)
-                                        Spacer()
-                                        Circle().fill(disk.isAvailable ? .green : .gray).frame(width: 8, height: 8)
-                                    }
-                                    Text(disk.name).appFont(.headline).lineLimit(1)
-                                    Text("\(disk.itemCount.formatted()) elementi").appFont(.subheadline).foregroundStyle(.secondary)
-                                    Text(disk.isAvailable ? "Collegato" : "Offline").appFont(.caption).foregroundStyle(.secondary)
-                                    Picker("Supporto", selection: Binding(
-                                        get: { store.disks.first(where: { $0.id == disk.id })?.mediaType ?? "Non specificato" },
-                                        set: { store.setMediaType($0, for: disk) }
-                                    )) {
-                                        ForEach(["Non specificato", "HDD", "SSD", "USB", "Scheda SD", "Altro"], id: \.self) { Text($0).tag($0) }
-                                    }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
-                                    HStack {
-                                        Button("Apri catalogo") { store.select(disk) }
-                                        Spacer()
-                                        Button { store.scan(disk) } label: { Image(systemName: "arrow.clockwise") }
-                                            .disabled(!disk.isAvailable || store.scanning)
-                                    }
-                                }
-                                .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 14))
-                                .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
-                                .contextMenu { Button("Rimuovi catalogo") { store.remove(disk) } }
-                            }
-                        }.padding(28)
+                        VStack(alignment: .leading, spacing: 26) {
+                            diskSection("SSD", disks: store.disks.filter { $0.mediaType == "SSD" })
+                            diskSection("HDD", disks: store.disks.filter { $0.mediaType == "HDD" })
+                            diskSection("ALTRI SUPPORTI", disks: store.disks.filter { !["SSD", "HDD"].contains($0.mediaType) })
+                        }
+                        .padding(28)
                     }
                 } else if let disk = store.selectedDiskRecord {
                     HStack {
@@ -726,6 +702,50 @@ struct MainView: View {
         .tint(accent)
         .environment(\.appTextScale, textScale)
         .background(canvas)
+    }
+
+    @ViewBuilder
+    private func diskSection(_ title: String, disks: [DiskRecord]) -> some View {
+        if !disks.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title).appFont(.headline, weight: .semibold).foregroundStyle(.secondary)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 14)], spacing: 14) {
+                    ForEach(disks) { disk in diskCard(disk) }
+                }
+            }
+        }
+    }
+
+    private func diskCard(_ disk: DiskRecord) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: disk.isAvailable ? "externaldrive.fill" : "externaldrive")
+                    .appFont(.title2).foregroundStyle(disk.isAvailable ? .green : .secondary)
+                Spacer()
+                Circle().fill(disk.isAvailable ? .green : .gray).frame(width: 8, height: 8)
+            }
+            Text(disk.name).appFont(.headline).lineLimit(1)
+            Text("\(disk.itemCount.formatted()) elementi").appFont(.subheadline).foregroundStyle(.secondary)
+            Text(disk.isAvailable ? "Collegato" : "Offline").appFont(.caption).foregroundStyle(.secondary)
+            Picker("Supporto", selection: Binding(
+                get: { store.disks.first(where: { $0.id == disk.id })?.mediaType ?? "Non specificato" },
+                set: { store.setMediaType($0, for: disk) }
+            )) {
+                ForEach(["Non specificato", "HDD", "SSD", "USB", "Scheda SD", "Altro"], id: \.self) { Text($0).tag($0) }
+            }.labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+            HStack {
+                Button("Apri catalogo") { store.select(disk) }
+                Spacer()
+                Button { diskPendingDeletion = disk } label: {
+                    Image(systemName: "trash")
+                }.buttonStyle(.borderless).help("Elimina questo catalogo")
+                Button { store.scan(disk) } label: { Image(systemName: "arrow.clockwise") }
+                    .disabled(!disk.isAvailable || store.scanning)
+            }
+        }
+        .padding(16).background(.background, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
+        .contextMenu { Button("Rimuovi catalogo", role: .destructive) { diskPendingDeletion = disk } }
     }
 
     @ViewBuilder private func resultRow(_ item: FileRecord) -> some View {
