@@ -106,6 +106,11 @@ struct CatalogDB {
             var d: OpaquePointer?
             sqlite3_prepare_v2(db, "DELETE FROM disks WHERE id=?", -1, &d, nil)
             bind(id.uuidString, to: 1, in: d); sqlite3_step(d); sqlite3_finalize(d)
+
+            // Reclaim on-disk space immediately after removing a catalog.
+            sqlite3_busy_timeout(db, 10000)
+            sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
+            sqlite3_exec(db, "VACUUM", nil, nil, nil)
         }
     }
 
