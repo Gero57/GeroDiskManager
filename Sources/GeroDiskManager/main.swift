@@ -60,6 +60,9 @@ struct CatalogDB {
         CREATE INDEX IF NOT EXISTS idx_items_directory_path
           ON items(diskID,path) WHERE isDirectory=1;
         """, nil, nil, nil)
+        // Colonna aggiunta in modo compatibile anche ai cataloghi già esistenti.
+        sqlite3_exec(db, "ALTER TABLE items ADD COLUMN lastSeen INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
+        sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_items_unique ON items(diskID,parentID,name,isDirectory)", nil, nil, nil)
     }
 
     private func run<T>(_ work: () -> T) -> T { queue.sync(execute: work) }
@@ -124,35 +127,79 @@ struct CatalogDB {
 
     // Le directory conservano il percorso una sola volta. I file memorizzano
     // soltanto l'ID della cartella madre e il proprio nome.
-    func insertDirectory(disk: DiskRecord, parentID: Int64, name: String, path: String) -> Int64 {
+    // Ogni elemento viene marcato con la generazione della scansione corrente:
+    // i record già presenti vengono aggiornati, quelli nuovi inseriti.
+    func insertDirectory(disk: DiskRecord, parentID: Int64, name: String, path: String, generation: Int64) -> Int64 {
         run {
             var s: OpaquePointer?
-            sqlite3_prepare_v2(db, "INSERT INTO items(diskID,parentID,name,path,isDirectory) VALUES(?,?,?,?,1)", -1, &s, nil)
+            sqlite3_prepare_v2(db, """
+                INSERT INTO items(diskID,parentID,name,path,isDirectory,lastSeen)
+                VALUES(?,?,?,?,1,?)
+                ON CONFLICT(diskID,parentID,name,isDirectory)
+                DO UPDATE SET path=excluded.path,lastSeen=excluded.lastSeen
+                """, -1, &s, nil)
             defer { sqlite3_finalize(s) }
             bind(disk.id.uuidString, to: 1, in: s)
             sqlite3_bind_int64(s, 2, parentID)
             bind(name, to: 3, in: s)
             bind(path, to: 4, in: s)
+            sqlite3_bind_int64(s, 5, generation)
             guard sqlite3_step(s) == SQLITE_DONE else { return 0 }
-            return sqlite3_last_insert_rowid(db)
+
+            var lookup: OpaquePointer?
+            sqlite3_prepare_v2(db, "SELECT id FROM items WHERE diskID=? AND parentID=? AND name=? AND isDirectory=1 LIMIT 1", -1, &lookup, nil)
+            defer { sqlite3_finalize(lookup) }
+            bind(disk.id.uuidString, to: 1, in: lookup)
+            sqlite3_bind_int64(lookup, 2, parentID)
+            bind(name, to: 3, in: lookup)
+            return sqlite3_step(lookup) == SQLITE_ROW ? sqlite3_column_int64(lookup, 0) : 0
         }
     }
 
-    func insertBatch(disk: DiskRecord, records: [FileRecordInput]) {
+    func insertBatch(disk: DiskRecord, records: [FileRecordInput], generation: Int64) {
         guard !records.isEmpty else { return }
         run {
             sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil)
             var s: OpaquePointer?
-            sqlite3_prepare_v2(db, "INSERT INTO items(diskID,parentID,name,path,isDirectory) VALUES(?,?,?,NULL,0)", -1, &s, nil)
+            sqlite3_prepare_v2(db, """
+                INSERT INTO items(diskID,parentID,name,path,isDirectory,lastSeen)
+                VALUES(?,?,?,NULL,0,?)
+                ON CONFLICT(diskID,parentID,name,isDirectory)
+                DO UPDATE SET lastSeen=excluded.lastSeen
+                """, -1, &s, nil)
             for r in records {
                 sqlite3_reset(s); sqlite3_clear_bindings(s)
                 bind(disk.id.uuidString, to: 1, in: s)
                 sqlite3_bind_int64(s, 2, r.parentID)
                 bind(r.name, to: 3, in: s)
+                sqlite3_bind_int64(s, 4, generation)
                 sqlite3_step(s)
             }
             sqlite3_finalize(s)
             sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        }
+    }
+
+    // Elimina le voci non più presenti solo se la scansione è stata completa.
+    // In caso di permessi mancanti conserva le voci non verificabili.
+    func finishScan(diskID: UUID, generation: Int64, removeMissing: Bool) -> Int {
+        run {
+            if removeMissing {
+                sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil)
+                var s: OpaquePointer?
+                sqlite3_prepare_v2(db, "DELETE FROM items WHERE diskID=? AND lastSeen<>?", -1, &s, nil)
+                bind(diskID.uuidString, to: 1, in: s)
+                sqlite3_bind_int64(s, 2, generation)
+                sqlite3_step(s)
+                sqlite3_finalize(s)
+                sqlite3_exec(db, "COMMIT", nil, nil, nil)
+            }
+            var count: OpaquePointer?
+            sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM items WHERE diskID=?", -1, &count, nil)
+            bind(diskID.uuidString, to: 1, in: count)
+            let result = sqlite3_step(count) == SQLITE_ROW ? Int(sqlite3_column_int64(count, 0)) : 0
+            sqlite3_finalize(count)
+            return result
         }
     }
 
@@ -301,38 +348,51 @@ final class CatalogStore: ObservableObject {
         let db = database
         Task.detached(priority: .userInitiated) {
             let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isHiddenKey]
+            var scanComplete = true
             guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
+                options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { _, _ in
+                    scanComplete = false
+                    return true
+                }) else {
                 await MainActor.run { self.scanning = false; self.status = "Impossibile leggere il disco" }
                 return
             }
+
             var batch: [FileRecordInput] = []
             var directoryIDs: [String: Int64] = [disk.rootPath: 0]
             var total = 0
-            db.removeDiskFilesOnly(disk.id)
+            let generation = Int64(Date().timeIntervalSince1970 * 1000)
 
             func flushFiles() {
                 guard !batch.isEmpty else { return }
-                db.insertBatch(disk: disk, records: batch)
+                db.insertBatch(disk: disk, records: batch, generation: generation)
                 total += batch.count
                 batch.removeAll(keepingCapacity: true)
             }
 
             while let url = enumerator.nextObject() as? URL {
-                let values = try? url.resourceValues(forKeys: Set(keys))
-                if values?.isHidden == true { continue }
+                guard let values = try? url.resourceValues(forKeys: Set(keys)) else {
+                    scanComplete = false
+                    continue
+                }
+                if values.isHidden == true { continue }
                 let parentPath = url.deletingLastPathComponent().path
-                guard let parentID = directoryIDs[parentPath] else { continue }
-                let isDirectory = values?.isDirectory ?? false
+                guard let parentID = directoryIDs[parentPath] else {
+                    scanComplete = false
+                    continue
+                }
+                let isDirectory = values.isDirectory ?? false
 
                 if isDirectory {
-                    // Inseriamo subito le directory per conoscere l'ID da assegnare ai figli.
                     flushFiles()
                     let id = db.insertDirectory(disk: disk, parentID: parentID,
-                                                name: url.lastPathComponent, path: url.path)
+                                                name: url.lastPathComponent, path: url.path,
+                                                generation: generation)
                     if id > 0 {
                         directoryIDs[url.path] = id
                         total += 1
+                    } else {
+                        scanComplete = false
                     }
                 } else {
                     batch.append(FileRecordInput(parentID: parentID, name: url.lastPathComponent))
@@ -341,23 +401,25 @@ final class CatalogStore: ObservableObject {
 
                 if total > 0 && total % 3000 == 0 {
                     let count = total
-                    await MainActor.run { self.progress = count; self.status = "Catalogati \(count.formatted()) elementi…" }
+                    await MainActor.run { self.progress = count; self.status = "Verificati \(count.formatted()) elementi…" }
                 }
             }
             flushFiles()
-            let finalCount = total
+
+            let indexedCount = db.finishScan(diskID: disk.id, generation: generation, removeMissing: scanComplete)
             await MainActor.run {
-                self.progress = finalCount
-                self.status = "Catalogati \(finalCount.formatted()) elementi…"
+                self.progress = indexedCount
+                self.status = scanComplete
+                    ? "Aggiornamento completato: \(indexedCount.formatted()) elementi"
+                    : "Aggiornamento parziale: conservate le voci non verificabili"
             }
             await MainActor.run {
                 if let i = self.disks.firstIndex(where: { $0.id == disk.id }) {
-                    self.disks[i].itemCount = total
+                    self.disks[i].itemCount = indexedCount
                     self.disks[i].scannedAt = Date()
                     db.upsert(self.disks[i])
                 }
                 self.scanning = false
-                self.status = "Catalogazione completata: \(total.formatted()) elementi"
                 self.loadChildren()
                 self.scheduleSearch()
             }
